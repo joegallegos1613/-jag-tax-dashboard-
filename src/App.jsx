@@ -25,7 +25,7 @@ const PAYMENT_STATUSES = ['Pending', 'Sent', 'Paid']
 const DELIVERABLE_TYPES = ['Estimate', 'Info Request', 'Meeting', 'Payment Request', 'Projection', 'Return Sent', 'Strategy Memo']
 const DELIVERABLE_STATUSES = ['Planned', 'Requested', 'Sent', 'Completed']
 
-// Your existing seed data (unchanged)
+// Seed data (unchanged)
 const DEFAULT_CLIENTS = [
   {
     id: '700019-1',
@@ -36,7 +36,7 @@ const DEFAULT_CLIENTS = [
     risk: 'High',
     status: 'Active',
     year: 2024,
-    safeHarbor: 65000,
+    safeHarbor: 65000, // legacy single-year; we fall back to this when year map missing
     deliverablesProgress: 75,
     estimateOwner: 'Averey',
     meetingOwner: 'Joe',
@@ -147,7 +147,6 @@ function today() {
   const yyyy = d.getFullYear()
   return `${yyyy}-${mm}-${dd}`
 }
-
 function yearOf(dateStr) {
   if (!dateStr || typeof dateStr !== 'string') return null
   const m = /^(\d{4})-/.exec(dateStr.trim())
@@ -165,14 +164,11 @@ function kpisFromDeliverablesForYear(c, taxYear) {
   const requestsSent   = list.filter(d => d.type === 'Info Request' && (d.status === 'Requested' || d.status === 'Sent' || d.status === 'Completed')).length
   return { estimatesSent, meetingsHeld, requestsSent }
 }
-
-// For generic alerting, we can still lean on current-year or selected year at render time
 function requiredMeetings(serviceLevel) {
   if (serviceLevel === 'Clarity') return 1
   if (serviceLevel === 'Elevate') return 2
   return 0
 }
-
 function getAlertsForYear(c, taxYear) {
   const { estimatesSent, meetingsHeld } = kpisFromDeliverablesForYear(c, taxYear)
   const alerts = []
@@ -181,7 +177,6 @@ function getAlertsForYear(c, taxYear) {
   if (meetingsHeld < need) alerts.push({ id: 'meeting-min', level: 'warn', text: `Meetings below minimum (${meetingsHeld}/${need}) for ${c.serviceLevel}` })
   return alerts
 }
-
 function totalPaidForYear(clientLike, taxYear) {
   const list = clientLike.paymentRequests || []
   return list.reduce((sum, p) => {
@@ -191,7 +186,27 @@ function totalPaidForYear(clientLike, taxYear) {
   }, 0)
 }
 
-// Store <-> Dashboard schema adapters
+// --------- Safe Harbor per-year helpers ---------
+function getSafeHarbor(clientLike, taxYear) {
+  // prefer map; else fall back to legacy single value
+  const map = clientLike.safeHarborByYear || {}
+  const val = map[taxYear]
+  if (typeof val === 'number') return val
+  return typeof clientLike.safeHarbor === 'number' ? clientLike.safeHarbor : 0
+}
+function setSafeHarborForYear(stateSetter, clientId, taxYear, newValue) {
+  const val = Number(newValue)
+  if (!Number.isFinite(val) || val < 0) return
+  stateSetter(prev => prev.map(c => {
+    if (c.id !== clientId) return c
+    const nextMap = { ...(c.safeHarborByYear || {}) , [taxYear]: val }
+    // keep legacy safeHarbor in sync when the edited year equals c.year
+    const legacy = Number(c.year) === Number(taxYear) ? val : (c.safeHarbor ?? 0)
+    return { ...c, safeHarborByYear: nextMap, safeHarbor: legacy }
+  }))
+}
+
+// Store <-> Dashboard adapters
 function toStoreFromDashboard(d) {
   return {
     id: d.id,
@@ -210,16 +225,13 @@ function expandRows(dashboardClients, storeClients) {
     yearsById.set(s.id, s.years || [])
     nameToYears.set((s.name || '').toLowerCase(), s.years || [])
   }
-
   const rows = []
   for (const c of dashboardClients) {
     const fromId = yearsById.get(c.id)
     const fromName = nameToYears.get((c.group || '').toLowerCase())
     let years = fromId || fromName || (c.year ? [Number(c.year)] : [])
     if (!years || years.length === 0) years = [new Date().getFullYear()]
-    for (const y of years) {
-      rows.push({ ...c, rowYear: Number(y), rowId: `${c.id}__${y}` })
-    }
+    for (const y of years) rows.push({ ...c, rowYear: Number(y), rowId: `${c.id}__${y}` })
   }
   rows.sort((a, b) => (b.rowYear || 0) - (a.rowYear || 0))
   return rows
@@ -338,14 +350,16 @@ export default function TaxPlanningDashboard() {
     const newClient = {
       id, group, client, entity, serviceLevel, risk: 'Low', status: 'Active',
       year: taxYear,
-      safeHarbor: 0, deliverablesProgress: 0, strategies: [], deliverables: [],
+      safeHarbor: 0,
+      safeHarborByYear: { [taxYear]: 0 }, // seed per-year map
+      deliverablesProgress: 0, strategies: [], deliverables: [],
       estimateOwner: '', meetingOwner: '', requestOwner: '',
       paymentRequests: [
-        { quarter: 'Q1', requestDate: null, amount: null, status: 'Pending', owner: null },
-        { quarter: 'Q2', requestDate: null, amount: null, status: 'Pending', owner: null },
-        { quarter: 'Q3', requestDate: null, amount: null, status: 'Pending', owner: null },
-        { quarter: 'Q4', requestDate: null, amount: null, status: 'Pending', owner: null },
-        { quarter: 'Extension', requestDate: null, amount: null, status: 'Pending', owner: null },
+        { quarter: 'Q1', requestDate: null, amount: null, status: 'Pending', owner: null, taxYear },
+        { quarter: 'Q2', requestDate: null, amount: null, status: 'Pending', owner: null, taxYear },
+        { quarter: 'Q3', requestDate: null, amount: null, status: 'Pending', owner: null, taxYear },
+        { quarter: 'Q4', requestDate: null, amount: null, status: 'Pending', owner: null, taxYear },
+        { quarter: 'Extension', requestDate: null, amount: null, status: 'Pending', owner: null, taxYear },
       ]
     }
 
@@ -413,13 +427,11 @@ export default function TaxPlanningDashboard() {
     setClients(prev => prev.map(pc => pc.id === clientId ? { ...pc, serviceLevel: newLevel } : pc))
   }
 
-  function updateSafeHarbor(clientId, newValue) {
-    const val = Number(newValue)
-    if (Number.isNaN(val) || val < 0) return
-    setClients(prev => prev.map(pc => pc.id === clientId ? { ...pc, safeHarbor: val } : pc))
+  function updateSafeHarborForSelectedYear(clientId, newValue) {
+    setSafeHarborForYear(setClients, clientId, selectedYear, newValue)
   }
 
-  // Deliverables — now tax-year stamped & filtered
+  // Deliverables — year-stamped & filtered
   function addDeliverable(c, preset) {
     const taxYear = Number(selectedYear || c.year || new Date().getFullYear())
     const type = preset?.type || prompt(`Type (${DELIVERABLE_TYPES.join(' / ')}):`, 'Estimate') || 'Estimate'
@@ -428,7 +440,6 @@ export default function TaxPlanningDashboard() {
     const status = preset?.status || prompt(`Status (${DELIVERABLE_STATUSES.join(' / ')}):`, 'Planned') || 'Planned'
     const notes = preset?.notes ?? (prompt('Notes (optional):', '') || '')
     const item = { id: `${Date.now()}`, type, date, owner, status, notes, taxYear }
-
     setClients(prev => prev.map(pc => pc.id !== c.id ? pc : { ...pc, deliverables: [item, ...(pc.deliverables || [])] }))
   }
 
@@ -441,7 +452,6 @@ export default function TaxPlanningDashboard() {
       if (pc.id !== clientId) return pc
       const deliverables = (pc.deliverables || []).map(d => {
         if (d.id !== deliverableId) return d
-        // If date changes, refresh taxYear from date (fallback to selectedYear/client.year)
         const newTaxYear = patch.date ? (yearOf(patch.date) ?? selectedYear ?? pc.year) : d.taxYear
         return { ...d, ...patch, taxYear: newTaxYear }
       })
@@ -488,7 +498,7 @@ export default function TaxPlanningDashboard() {
         </div>
       </div>
 
-      {/* Table: one row per (client × year) with YTD Paid */}
+      {/* Table: one row per (client × year) with YTD Paid and year-scoped Safe Harbor */}
       {!selectedClient && (
         <div className="px-6 -mt-6">
           <Card className="rounded-2xl">
@@ -511,6 +521,7 @@ export default function TaxPlanningDashboard() {
                 const alerts = getAlertsForYear(r, r.rowYear)
                 const rowTone = alerts.some(a => a.level === 'error') ? 'bg-red-50' : alerts.some(a => a.level === 'warn') ? 'bg-amber-50' : 'bg-white'
                 const ytdPaid = totalPaidForYear(r, r.rowYear)
+                const safeHarborVal = getSafeHarbor(r, r.rowYear)
                 return (
                   <div
                     key={r.rowId}
@@ -522,7 +533,7 @@ export default function TaxPlanningDashboard() {
                     <div className="col-span-1 text-gray-600">{r.entity}</div>
                     <div className="col-span-1 text-gray-600">{r.serviceLevel}</div>
                     <div className="col-span-1"><Badge className={r.risk === 'High' ? 'pill-err' : r.risk === 'Medium' ? 'pill-warn' : 'pill-okay'}>{r.risk}</Badge></div>
-                    <div className="col-span-1">${r.safeHarbor?.toLocaleString?.() ?? r.safeHarbor}</div>
+                    <div className="col-span-1">${(safeHarborVal ?? 0).toLocaleString()}</div>
                     <div className="col-span-1 text-center">{estimatesSent}</div>
                     <div className="col-span-1 text-center">{meetingsHeld}</div>
                     <div className="col-span-1 text-center">{requestsSent}</div>
@@ -535,7 +546,7 @@ export default function TaxPlanningDashboard() {
         </div>
       )}
 
-      {/* Detail drawer (Payments & Deliverables scoped to selectedYear) */}
+      {/* Detail drawer (year-scoped KPIs, Payments, Deliverables, Safe Harbor editor) */}
       {selectedClient && (() => {
         const alerts = getAlertsForYear(selectedClient, selectedYear)
         const tone = alerts.some(a => a.level === 'error') ? 'err' : alerts.some(a => a.level === 'warn') ? 'warn' : 'ok'
@@ -553,6 +564,8 @@ export default function TaxPlanningDashboard() {
           return Number(y) === Number(selectedYear)
         })
 
+        const safeHarborForYear = getSafeHarbor(selectedClient, selectedYear)
+
         return (
           <div className="px-6 mt-6 space-y-4">
             <div className="text-sm text-gray-500">
@@ -567,9 +580,20 @@ export default function TaxPlanningDashboard() {
               )}
             </Alert>
 
-            {/* KPI quick actions */}
+            {/* KPI quick actions + Safe Harbor (year-scoped) */}
             <Card>
               <CardContent className="flex flex-wrap gap-3 items-center">
+                <div className="text-sm text-gray-600">
+                  Safe Harbor Target ($):
+                  <input
+                    type="number"
+                    className="border rounded-xl px-3 py-2 w-40 ml-2"
+                    value={safeHarborForYear ?? 0}
+                    min={0}
+                    onChange={(e) => updateSafeHarborForSelectedYear(selectedClient.id, e.target.value)}
+                  />
+                </div>
+
                 <div className="text-sm text-gray-600">Estimates Sent: <span className="font-semibold">{estimatesSent}</span></div>
                 <Button className="btn-soft" onClick={() => addDeliverable(selectedClient, { type: 'Estimate', status: 'Sent', owner: selectedClient.estimateOwner || 'Unassigned', date: today(), notes: 'Estimate sent' })}>+ Estimate</Button>
 
@@ -688,7 +712,7 @@ export default function TaxPlanningDashboard() {
                 </div>
               </TabsContent>
 
-              {/* STRATEGIES (not year-scoped yet; can scope if you want) */}
+              {/* STRATEGIES (not year-scoped yet; can scope if you want later) */}
               <TabsContent value="strategies" className="mt-2 text-sm text-gray-700 space-y-3">
                 {(selectedClient.strategies?.length ?? 0) === 0 && <p className="text-gray-600">No strategies listed yet.</p>}
                 <ul className="list-disc ml-5 space-y-1">
