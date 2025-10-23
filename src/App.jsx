@@ -221,10 +221,35 @@ function setServiceLevelForYear(stateSetter, clientId, taxYear, level) {
     if (c.id !== clientId) return c
     const next = { ...(c.serviceLevelByYear || {}) }
     next[taxYear] = level
-    // keep top‑level serviceLevel for back‑compat / display when rowYear == legacy year
     const legacy = Number(c.year) === Number(taxYear) ? level : (c.serviceLevel || 'Clarity')
     return { ...c, serviceLevelByYear: next, serviceLevel: legacy }
   }))
+}
+
+// --------- Derived Risk (per‑year) ---------
+// Heuristic:
+//  - Start Low
+//  - If meetings below minimum for that year → at least Medium
+//  - If *also* no estimates sent → High
+//  - If YTD paid < 50% of Safe Harbor AND at least two quarters exist (Q1/Q2/Q3/Q4) with status Sent/Requested → bump one level
+function riskForClientYear(c, taxYear) {
+  const alerts = getAlertsForYear(c, taxYear)
+  const safeHarbor = getSafeHarbor(c, taxYear) || 0
+  const paid = totalPaidForYear(c, taxYear)
+  const quarters = (c.paymentRequests || []).filter(p => (p.taxYear ?? yearOf(p.requestDate) ?? c.year) === taxYear)
+  const activeRq = quarters.filter(p => ['Sent','Requested'].includes(p.status)).length
+
+  let level = 'Low'
+  const hasMeetWarn = alerts.some(a => a.id === 'meeting-min')
+  const hasNoEst = alerts.some(a => a.id === 'no-estimates')
+
+  if (hasMeetWarn) level = 'Medium'
+  if (hasMeetWarn && hasNoEst) level = 'High'
+
+  if (safeHarbor > 0 && paid < 0.5 * safeHarbor && activeRq >= 2) {
+    level = (level === 'Low') ? 'Medium' : 'High'
+  }
+  return level
 }
 
 // Store <-> Dashboard adapters
@@ -563,7 +588,6 @@ export default function TaxPlanningDashboard() {
             // 🧩 Merge updates from the client screen
             curr.group = s.name || curr.group
             curr.entity = s.entityType || curr.entity
-            // If years changed, prefer the first as primary display year (keeps expandRows correct)
             if (Array.isArray(s.years) && s.years.length) {
               curr.year = s.years[0]
             }
@@ -617,7 +641,7 @@ export default function TaxPlanningDashboard() {
   const filtered = useMemo(() => {
     return expandedRows.filter(r =>
       (yearFilter === 'All' || Number(r.rowYear) === Number(yearFilter)) &&
-      (risk === 'All' || r.risk === risk) &&
+      (risk === 'All' || riskForClientYear(r, r.rowYear) === risk) &&
       (query.length < 2 || [r.group, r.client, r.entity].join(' ').toLowerCase().includes(query.toLowerCase()))
     )
   }, [expandedRows, yearFilter, risk, query])
@@ -726,7 +750,6 @@ export default function TaxPlanningDashboard() {
     const amount = Number(prompt('Amount (just numbers):', '0') || 0)
     const status = prompt('Status (Pending / Sent / Paid):', 'Pending') || 'Pending'
 
-    // choose owner by ID using SST
     const pickOwnerName = prompt('Owner (name, optional – will map to SST):', '') || ''
     const ownerId = pickOwnerName ? (ownerByName.get(pickOwnerName.toLowerCase()) || null) : null
 
@@ -760,15 +783,10 @@ export default function TaxPlanningDashboard() {
     })
   }
 
-  function updateSafeHarborForSelectedYear(clientId, newValue) {
-    setSafeHarborForYear(setClients, clientId, selectedYear, newValue)
-  }
-
   function addDeliverable(c, preset) {
     const taxYear = Number(selectedYear || c.year || new Date().getFullYear())
     const type = preset?.type || prompt(`Type (${DELIVERABLE_TYPES.join(' / ')}):`, 'Estimate') || 'Estimate'
     const date = preset?.date || prompt('Date (YYYY-MM-DD):', today()) || today()
-    // select owner by ID
     const defaultOwnerName = owners[0]?.name || ''
     const ownerName = preset?.owner || prompt('Owner (name, optional – will map to SST):', defaultOwnerName) || ''
     const ownerId = ownerName ? (ownerByName.get(ownerName.toLowerCase()) || null) : null
@@ -792,9 +810,7 @@ export default function TaxPlanningDashboard() {
         if (pc.id !== clientId) return pc
         const deliverables = (pc.deliverables || []).map(d => {
           if (d.id !== deliverableId) return d
-          // ✅ Keep taxYear STABLE on edits (do NOT recompute from date)
           const stableTaxYear = d.taxYear ?? selectedYear ?? pc.year
-          // if patch.ownerId missing but patch.owner given (legacy), map to id
           const ownerIdFromName = (patch.owner && !patch.ownerId) ? (ownerByName.get(String(patch.owner).toLowerCase()) || null) : undefined
           return { ...d, ...patch, ...(ownerIdFromName !== undefined ? { ownerId: ownerIdFromName } : {}), taxYear: stableTaxYear }
         })
@@ -803,7 +819,6 @@ export default function TaxPlanningDashboard() {
     })
   }
 
-  // Board drill handler → open detail for (clientId, year)
   function drillToClientYear(clientId, year) {
     const target = clients.find(c => c.id === clientId)
     if (!target) return
@@ -887,7 +902,7 @@ export default function TaxPlanningDashboard() {
               <Card className="rounded-2xl">
                 <CardContent className="p-4 space-y-3">
                   <div className="grid grid-cols-12 text-xs text-gray-500 font-medium border-b pb-2">
-                    <div className="col-span-3">Client</div>
+                    <div className="col-span-2">Client</div>
                     <div className="col-span-1">Tax Year</div>
                     <div className="col-span-1">Entity</div>
                     <div className="col-span-1">Service Level</div>
@@ -906,27 +921,33 @@ export default function TaxPlanningDashboard() {
                     const rowTone = alerts.some(a => a.level === 'error') ? 'bg-red-50' : alerts.some(a => a.level === 'warn') ? 'bg-amber-50' : 'bg-white'
                     const ytdPaid = totalPaidForYear(r, r.rowYear)
                     const safeHarborVal = getSafeHarbor(r, r.rowYear)
+                    const displayRisk = riskForClientYear(r, r.rowYear)
                     const sl = getServiceLevel(r, r.rowYear)
                     return (
                       <div
                         key={r.rowId}
                         className={`grid grid-cols-12 items-center border-b py-2 text-sm hover:bg-gray-50 rounded-lg ${rowTone}`}
                       >
-                        <div className="col-span-3 font-medium cursor-pointer" onClick={() => { setSelectedClient(r); setSelectedYear(r.rowYear); }}>
+                        <div className="col-span-2 font-medium cursor-pointer" onClick={() => { setSelectedClient(r); setSelectedYear(r.rowYear); }}>
                           {r.group}
                         </div>
                         <div className="col-span-1 text-gray-700 cursor-pointer" onClick={() => { setSelectedClient(r); setSelectedYear(r.rowYear); }}>{r.rowYear}</div>
                         <div className="col-span-1 text-gray-600 cursor-pointer" onClick={() => { setSelectedClient(r); setSelectedYear(r.rowYear); }}>{r.entity}</div>
                         <div className="col-span-1 text-gray-600 cursor-pointer" onClick={() => { setSelectedClient(r); setSelectedYear(r.rowYear); }}>{sl}</div>
-                        <div className="col-span-1"><Badge className={r.risk === 'High' ? 'pill-err' : r.risk === 'Medium' ? 'pill-warn' : 'pill-okay'}>{r.risk}</Badge></div>
+                        <div className="col-span-1">
+                          <Badge className={displayRisk === 'High' ? 'pill-err' : displayRisk === 'Medium' ? 'pill-warn' : 'pill-okay'}>
+                            {displayRisk}
+                          </Badge>
+                        </div>
                         <div className="col-span-1">${(safeHarborVal ?? 0).toLocaleString()}</div>
                         <div className="col-span-1 text-center">{estimatesSent}</div>
                         <div className="col-span-1 text-center">{meetingsHeld}</div>
                         <div className="col-span-1 text-center">{requestsSent}</div>
                         <div className="col-span-1 text-center font-semibold">${ytdPaid.toLocaleString()}</div>
+                        {/* Actions pinned at far right */}
                         <div className="col-span-1 flex justify-end pr-2">
                           <button
-                            className="rounded-md px-2 py-1 hover:bg-red-50 border border-transparent hover:border-red-200"
+                            className="rounded-md px-2 py-1 hover:bg-red-50 border border-transparent hover:border-red-200 inline-flex items-center justify-center"
                             title="Delete client"
                             onClick={(e) => { e.stopPropagation(); deleteClient(r.id) }}
                           >
@@ -1097,7 +1118,6 @@ export default function TaxPlanningDashboard() {
                                 <div className="text-[10px] text-gray-400 mt-0.5">Tax Year: {d.taxYear ?? (yearOf(d.date) ?? selectedClientFresh.year)}</div>
                               </td>
                               <td className="p-2 border">
-                                {/* Owner dropdown (IDs) */}
                                 <OwnerSelect
                                   owners={owners}
                                   value={d.ownerId || ''}
