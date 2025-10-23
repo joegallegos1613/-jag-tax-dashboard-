@@ -29,7 +29,7 @@ const BOARD_TYPES = [...DELIVERABLE_TYPES]
 const BOARD_STATUSES = [...DELIVERABLE_STATUSES]
 
 // ----------------------------------------------
-// Seed data (unchanged structure, but deliverables will migrate to ownerId)
+// Seed data (unchanged structure; per‑year fields are resolved by helpers)
 // ----------------------------------------------
 const DEFAULT_CLIENTS = [
   {
@@ -154,11 +154,11 @@ function today() {
 }
 function yearOf(dateStr) {
   if (!dateStr || typeof dateStr !== 'string') return null
-  const m = /^(\d{4})-/.exec(dateStr.trim())
+  const m = /^(\\d{4})-/.exec(dateStr.trim())
   return m ? Number(m[1]) : null
 }
 
-// Year-scoped KPIs from deliverables
+// Year‑scoped KPIs from deliverables
 function kpisFromDeliverablesForYear(c, taxYear) {
   const list = (c.deliverables || []).filter(d => {
     const y = d.taxYear ?? yearOf(d.date) ?? c.year ?? null
@@ -178,8 +178,9 @@ function getAlertsForYear(c, taxYear) {
   const { estimatesSent, meetingsHeld } = kpisFromDeliverablesForYear(c, taxYear)
   const alerts = []
   if (estimatesSent === 0) alerts.push({ id: 'no-estimates', level: 'error', text: 'No estimates communicated' })
-  const need = requiredMeetings(c.serviceLevel)
-  if (meetingsHeld < need) alerts.push({ id: 'meeting-min', level: 'warn', text: `Meetings below minimum (${meetingsHeld}/${need}) for ${c.serviceLevel}` })
+  const sl = getServiceLevel(c, taxYear)
+  const need = requiredMeetings(sl)
+  if (meetingsHeld < need) alerts.push({ id: 'meeting-min', level: 'warn', text: `Meetings below minimum (${meetingsHeld}/${need}) for ${sl}` })
   return alerts
 }
 function totalPaidForYear(clientLike, taxYear) {
@@ -191,7 +192,7 @@ function totalPaidForYear(clientLike, taxYear) {
   }, 0)
 }
 
-// --------- Safe Harbor per-year helpers ---------
+// --------- Safe Harbor per‑year helpers ---------
 function getSafeHarbor(clientLike, taxYear) {
   const map = clientLike.safeHarborByYear || {}
   const val = map[taxYear]
@@ -206,6 +207,23 @@ function setSafeHarborForYear(stateSetter, clientId, taxYear, newValue) {
     const nextMap = { ...(c.safeHarborByYear || {}) , [taxYear]: val }
     const legacy = Number(c.year) === Number(taxYear) ? val : (c.safeHarbor ?? 0)
     return { ...c, safeHarborByYear: nextMap, safeHarbor: legacy }
+  }))
+}
+
+// --------- Service Level per‑year helpers (NEW) ---------
+function getServiceLevel(clientLike, taxYear) {
+  const map = clientLike.serviceLevelByYear || {}
+  return map[taxYear] || clientLike.serviceLevel || 'Clarity'
+}
+function setServiceLevelForYear(stateSetter, clientId, taxYear, level) {
+  if (!SERVICE_LEVELS.includes(level)) return
+  stateSetter(prev => prev.map(c => {
+    if (c.id !== clientId) return c
+    const next = { ...(c.serviceLevelByYear || {}) }
+    next[taxYear] = level
+    // keep top‑level serviceLevel for back‑compat / display when rowYear == legacy year
+    const legacy = Number(c.year) === Number(taxYear) ? level : (c.serviceLevel || 'Clarity')
+    return { ...c, serviceLevelByYear: next, serviceLevel: legacy }
   }))
 }
 
@@ -627,7 +645,7 @@ export default function TaxPlanningDashboard() {
     if (!selectedClientFresh || !selectedYear) return
     const v = getSafeHarbor(selectedClientFresh, selectedYear)
     setDraftSafeHarbor(String(v ?? 0))
-    setDraftServiceLevel(selectedClientFresh.serviceLevel || 'Clarity')
+    setDraftServiceLevel(getServiceLevel(selectedClientFresh, selectedYear))
   }, [selectedClientFresh, selectedYear])
 
   function commitSafeHarbor() {
@@ -644,7 +662,7 @@ export default function TaxPlanningDashboard() {
     if (!selectedClientFresh) return
     setDraftServiceLevel(level)
     startTransition(() => {
-      setClients(prev => prev.map(pc => pc.id === selectedClientFresh.id ? { ...pc, serviceLevel: level } : pc))
+      setServiceLevelForYear(setClients, selectedClientFresh.id, selectedYear, level)
     })
   }
 
@@ -663,6 +681,7 @@ export default function TaxPlanningDashboard() {
       year: taxYear,
       safeHarbor: 0,
       safeHarborByYear: { [taxYear]: 0 },
+      serviceLevelByYear: { [taxYear]: serviceLevel },
       deliverablesProgress: 0, strategies: [], deliverables: [],
       estimateOwner: '', meetingOwner: '', requestOwner: '',
       paymentRequests: [
@@ -741,10 +760,6 @@ export default function TaxPlanningDashboard() {
     })
   }
 
-  function updateServiceLevel(clientId, newLevel) {
-    setClients(prev => prev.map(pc => pc.id === clientId ? { ...pc, serviceLevel: newLevel } : pc))
-  }
-
   function updateSafeHarborForSelectedYear(clientId, newValue) {
     setSafeHarborForYear(setClients, clientId, selectedYear, newValue)
   }
@@ -777,10 +792,11 @@ export default function TaxPlanningDashboard() {
         if (pc.id !== clientId) return pc
         const deliverables = (pc.deliverables || []).map(d => {
           if (d.id !== deliverableId) return d
-          const newTaxYear = patch.date ? (yearOf(patch.date) ?? selectedYear ?? pc.year) : d.taxYear
+          // ✅ Keep taxYear STABLE on edits (do NOT recompute from date)
+          const stableTaxYear = d.taxYear ?? selectedYear ?? pc.year
           // if patch.ownerId missing but patch.owner given (legacy), map to id
           const ownerIdFromName = (patch.owner && !patch.ownerId) ? (ownerByName.get(String(patch.owner).toLowerCase()) || null) : undefined
-          return { ...d, ...patch, ...(ownerIdFromName !== undefined ? { ownerId: ownerIdFromName } : {}), taxYear: newTaxYear }
+          return { ...d, ...patch, ...(ownerIdFromName !== undefined ? { ownerId: ownerIdFromName } : {}), taxYear: stableTaxYear }
         })
         return { ...pc, deliverables }
       }))
@@ -881,6 +897,7 @@ export default function TaxPlanningDashboard() {
                     <div className="col-span-1">Meetings Held</div>
                     <div className="col-span-1">Requests Sent</div>
                     <div className="col-span-1">YTD Paid</div>
+                    <div className="col-span-1 text-right pr-2">Actions</div>
                   </div>
 
                   {filtered.map((r) => {
@@ -889,22 +906,33 @@ export default function TaxPlanningDashboard() {
                     const rowTone = alerts.some(a => a.level === 'error') ? 'bg-red-50' : alerts.some(a => a.level === 'warn') ? 'bg-amber-50' : 'bg-white'
                     const ytdPaid = totalPaidForYear(r, r.rowYear)
                     const safeHarborVal = getSafeHarbor(r, r.rowYear)
+                    const sl = getServiceLevel(r, r.rowYear)
                     return (
                       <div
                         key={r.rowId}
-                        onClick={() => { setSelectedClient(r); setSelectedYear(r.rowYear); }}
-                        className={`grid grid-cols-12 items-center border-b py-2 text-sm hover:bg-gray-50 cursor-pointer rounded-lg ${rowTone}`}
+                        className={`grid grid-cols-12 items-center border-b py-2 text-sm hover:bg-gray-50 rounded-lg ${rowTone}`}
                       >
-                        <div className="col-span-3 font-medium">{r.group}</div>
-                        <div className="col-span-1 text-gray-700">{r.rowYear}</div>
-                        <div className="col-span-1 text-gray-600">{r.entity}</div>
-                        <div className="col-span-1 text-gray-600">{r.serviceLevel}</div>
+                        <div className="col-span-3 font-medium cursor-pointer" onClick={() => { setSelectedClient(r); setSelectedYear(r.rowYear); }}>
+                          {r.group}
+                        </div>
+                        <div className="col-span-1 text-gray-700 cursor-pointer" onClick={() => { setSelectedClient(r); setSelectedYear(r.rowYear); }}>{r.rowYear}</div>
+                        <div className="col-span-1 text-gray-600 cursor-pointer" onClick={() => { setSelectedClient(r); setSelectedYear(r.rowYear); }}>{r.entity}</div>
+                        <div className="col-span-1 text-gray-600 cursor-pointer" onClick={() => { setSelectedClient(r); setSelectedYear(r.rowYear); }}>{sl}</div>
                         <div className="col-span-1"><Badge className={r.risk === 'High' ? 'pill-err' : r.risk === 'Medium' ? 'pill-warn' : 'pill-okay'}>{r.risk}</Badge></div>
                         <div className="col-span-1">${(safeHarborVal ?? 0).toLocaleString()}</div>
                         <div className="col-span-1 text-center">{estimatesSent}</div>
                         <div className="col-span-1 text-center">{meetingsHeld}</div>
                         <div className="col-span-1 text-center">{requestsSent}</div>
                         <div className="col-span-1 text-center font-semibold">${ytdPaid.toLocaleString()}</div>
+                        <div className="col-span-1 flex justify-end pr-2">
+                          <button
+                            className="rounded-md px-2 py-1 hover:bg-red-50 border border-transparent hover:border-red-200"
+                            title="Delete client"
+                            onClick={(e) => { e.stopPropagation(); deleteClient(r.id) }}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
                     )
                   })}
