@@ -39,7 +39,88 @@ const DEFAULT_CLIENTS = [
       { quarter: 'Q1', requestDate: '2024-03-10', amount: 12000, status: 'Paid', owner: 'Averey' },
       { quarter: 'Q2', requestDate: '2024-06-10', amount: 14000, status: 'Paid', owner: 'Joe' },
       { quarter: 'Q3', requestDate: '2024-09-10', amount: 16000, status: 'Pending', owner: 'Hector' },
-      { quarter: 'Q4', requestDate: null, amount: null, status: 'Pending', owner: null }
+      { quarter: 'Q4', requestDate: null, amount: null, status: 'Pending', owner: null },
+      { quarter: 'Extension', requestDate: null, amount: null, status: 'Pending', owner: null }
+    ]
+  },
+  {
+    id: '800101-2',
+    group: 'Riverstone Ventures LLC',
+    client: 'Sarah Nguyen',
+    entity: 'S Corp',
+    serviceLevel: 'Clarity',
+    risk: 'Medium',
+    status: 'Active',
+    year: 2025,
+    safeHarbor: 32000,
+    deliverablesProgress: 40,
+    estimateOwner: 'Averey',
+    meetingOwner: 'Joe',
+    requestOwner: 'Hector',
+    strategies: [],
+    deliverables: [
+      { id: 'rv1', type: 'Info Request', date: '2025-02-01', owner: 'Hector', status: 'Requested', notes: 'Bank stmts 2025 YTD' },
+      { id: 'rv2', type: 'Estimate', date: '2025-04-10', owner: 'Averey', status: 'Sent', notes: 'Q1 estimate' }
+    ],
+    paymentRequests: [
+      { quarter: 'Q1', requestDate: '2025-04-12', amount: 6000, status: 'Paid', owner: 'Averey' },
+      { quarter: 'Q2', requestDate: '2025-06-15', amount: 7000, status: 'Pending', owner: 'Joe' },
+      { quarter: 'Q3', requestDate: null, amount: null, status: 'Pending', owner: null },
+      { quarter: 'Q4', requestDate: null, amount: null, status: 'Pending', owner: null },
+      { quarter: 'Extension', requestDate: null, amount: null, status: 'Pending', owner: null }
+    ]
+  },
+  {
+    id: '900222-3',
+    group: 'Triet Harari LLC',
+    client: 'Daniel Lee',
+    entity: 'Partnership',
+    serviceLevel: 'On Demand',
+    risk: 'Low',
+    status: 'Active',
+    year: 2025,
+    safeHarbor: 15000,
+    deliverablesProgress: 20,
+    estimateOwner: 'Averey',
+    meetingOwner: 'Joe',
+    requestOwner: 'Hector',
+    strategies: [],
+    deliverables: [
+      { id: 'th1', type: 'Info Request', date: '2025-03-05', owner: 'Hector', status: 'Requested', notes: '1099s & payroll' }
+    ],
+    paymentRequests: [
+      { quarter: 'Q1', requestDate: '2025-04-15', amount: 3000, status: 'Paid', owner: 'Hector' },
+      { quarter: 'Q2', requestDate: null, amount: null, status: 'Pending', owner: null },
+      { quarter: 'Q3', requestDate: null, amount: null, status: 'Pending', owner: null },
+      { quarter: 'Q4', requestDate: null, amount: null, status: 'Pending', owner: null },
+      { quarter: 'Extension', requestDate: null, amount: null, status: 'Pending', owner: null }
+    ]
+  },
+  {
+    id: '1000333-4',
+    group: 'RealSteel Center LLC',
+    client: 'Javier Mendez',
+    entity: 'S Corp',
+    serviceLevel: 'Elevate',
+    risk: 'High',
+    status: 'Active',
+    year: 2025,
+    safeHarbor: 90000,
+    deliverablesProgress: 55,
+    estimateOwner: 'Averey',
+    meetingOwner: 'Joe',
+    requestOwner: 'Hector',
+    strategies: [],
+    deliverables: [
+      { id: 'rs1', type: 'Meeting', date: '2025-01-20', owner: 'Joe', status: 'Completed', notes: 'Kickoff planning' },
+      { id: 'rs2', type: 'Estimate', date: '2025-03-31', owner: 'Averey', status: 'Sent', notes: 'Q1 SH sent' }
+    ],
+    paymentRequests: [
+      { quarter: 'Q1', requestDate: '2025-04-05', amount: 22000, status: 'Paid', owner: 'Averey' },
+      { quarter: 'Q2', requestDate: '2025-06-10', amount: 23000, status: 'Paid', owner: 'Joe' },
+      { quarter: 'Q3', requestDate: '2025-09-10', amount: 24000, status: 'Pending', owner: 'Hector' },
+      { quarter: 'Q4', requestDate: null, amount: null, status: 'Pending', owner: null },
+      { quarter: 'Extension', requestDate: null, amount: null, status: 'Pending', owner: null }
     ]
   }
 ]
@@ -89,7 +170,7 @@ export default function TaxPlanningDashboard() {
   })
   useEffect(() => { localStorage.setItem('jag_clients', JSON.stringify(clients)) }, [clients])
 
-  const [year, setYear] = useState('2024')
+  const [year, setYear] = useState('All')
   const [risk, setRisk] = useState('All')
   const [query, setQuery] = useState('')
   const [selectedClient, setSelectedClient] = useState(null)
@@ -116,15 +197,29 @@ export default function TaxPlanningDashboard() {
         { quarter: 'Q2', requestDate: null, amount: null, status: 'Pending', owner: null },
         { quarter: 'Q3', requestDate: null, amount: null, status: 'Pending', owner: null },
         { quarter: 'Q4', requestDate: null, amount: null, status: 'Pending', owner: null },
+        { quarter: 'Extension', requestDate: null, amount: null, status: 'Pending', owner: null },
       ]
     }
     setClients(prev => [newClient, ...prev])
+    setYear('All')
     setSelectedClient(newClient)
   }
 
+  function deleteClient(clientId) {
+    if (!confirm('Delete this client? This action cannot be undone.')) return
+    setClients(prev => prev.filter(c => c.id !== clientId))
+    setSelectedClient(null)
+  }
+
   function addOrUpdatePayment(c) {
-    const quarter = prompt('Quarter to add/update (Q1, Q2, Q3, Q4):');
-    if (!quarter || !['Q1','Q2','Q3','Q4'].includes(quarter)) return alert('Please enter Q1/Q2/Q3/Q4')
+    let quarter = prompt('Quarter to add/update (Q1, Q2, Q3, Q4, Extension or EXT):');
+    if (!quarter) return
+    quarter = quarter.trim().toUpperCase()
+    if (quarter === 'EXT') quarter = 'EXTENSION'
+    const allowed = ['Q1','Q2','Q3','Q4','EXTENSION']
+    if (!allowed.includes(quarter)) return alert('Please enter Q1/Q2/Q3/Q4/Extension (or EXT)')
+    const normalizedQuarter = quarter === 'EXTENSION' ? 'Extension' : quarter
+
     const requestDate = prompt('Request date (YYYY-MM-DD):', today())
     const amount = Number(prompt('Amount (just numbers):', '0') || 0)
     const status = prompt('Status (Pending / Sent / Paid):', 'Pending') || 'Pending'
@@ -132,7 +227,10 @@ export default function TaxPlanningDashboard() {
 
     setClients(prev => prev.map(pc => {
       if (pc.id !== c.id) return pc
-      const paymentRequests = pc.paymentRequests.map(p => p.quarter === quarter ? { quarter, requestDate, amount, status, owner } : p)
+      // ensure Extension slot exists
+      const ensure = (arr) => arr.some(p => p.quarter === 'Extension') ? arr : [...arr, { quarter: 'Extension', requestDate: null, amount: null, status: 'Pending', owner: null }]
+      const base = ensure(pc.paymentRequests || [])
+      const paymentRequests = base.map(p => p.quarter === normalizedQuarter ? { quarter: normalizedQuarter, requestDate, amount, status, owner } : p)
       return { ...pc, paymentRequests }
     }))
   }
@@ -147,6 +245,12 @@ export default function TaxPlanningDashboard() {
 
   function updateServiceLevel(clientId, newLevel) {
     setClients(prev => prev.map(pc => pc.id === clientId ? { ...pc, serviceLevel: newLevel } : pc))
+  }
+
+  function updateSafeHarbor(clientId, newValue) {
+    const val = Number(newValue)
+    if (Number.isNaN(val) || val < 0) return
+    setClients(prev => prev.map(pc => pc.id === clientId ? { ...pc, safeHarbor: val } : pc))
   }
 
   // Deliverables quick-adds (these directly add to the deliverables list)
@@ -187,9 +291,15 @@ export default function TaxPlanningDashboard() {
       {/* Gradient hero */}
       <div className="app-hero px-6 pt-8 pb-6">
         <div className="flex items-center justify-between">
-          <h1 className="text-3xl font-semibold tracking-tight">JAG — Client‑Level Tax Planning</h1>
+          <h1 className="text-3xl font-semibold tracking-tight">JAG — Client-Level Tax Planning</h1>
           <div className="flex gap-2">
-            <Button onClick={addClient}>+ Add Client</Button>
+            {!selectedClient && <Button onClick={addClient}>+ Add Client</Button>}
+            {selectedClient && (
+              <>
+                <Button className="btn-soft" onClick={() => setSelectedClient(null)}>← Back to Dashboard</Button>
+                <Button className="btn-soft" onClick={() => deleteClient(selectedClient.id)} title="Delete client">🗑 Delete Client</Button>
+              </>
+            )}
           </div>
         </div>
         <div className="mt-4 flex gap-3 items-center">
@@ -197,12 +307,12 @@ export default function TaxPlanningDashboard() {
             <Search className="w-4 h-4 absolute left-3 top-3 text-gray-400" />
             <Input placeholder="Search client or entity..." className="pl-9" value={query} onChange={(e) => setQuery(e.target.value)} />
           </div>
-          <select className="border rounded-xl px-3 py-2 bg-white" value={year} onChange={(e) => setYear(e.target.value)}>
+          <select className="border rounded-xl px-3 py-2 bg-white" value={year} onChange={(e) => setYear(e.target.value)} disabled={!!selectedClient}>
             <option value="All">All Years</option>
             <option value="2024">2024</option>
             <option value="2025">2025</option>
           </select>
-          <select className="border rounded-xl px-3 py-2 bg-white" value={risk} onChange={(e) => setRisk(e.target.value)}>
+          <select className="border rounded-xl px-3 py-2 bg-white" value={risk} onChange={(e) => setRisk(e.target.value)} disabled={!!selectedClient}>
             {['All','Low','Medium','High'].map(r => <option key={r} value={r}>{r}</option>)}
           </select>
         </div>
@@ -288,14 +398,27 @@ export default function TaxPlanningDashboard() {
               </CardContent>
             </Card>
 
-            {/* Service Level */}
+            {/* Service Level + Safe Harbor */}
             <Card>
               <CardContent>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-600">Service Level:</span>
-                  <select className="border rounded-xl px-2 py-1 bg-white" value={selectedClient.serviceLevel} onChange={(e) => updateServiceLevel(selectedClient.id, e.target.value)}>
-                    {SERVICE_LEVELS.map(sl => <option key={sl} value={sl}>{sl}</option>)}
-                  </select>
+                <div className="grid md:grid-cols-2 gap-4 items-center">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-gray-600">Service Level:</span>
+                    <select className="border rounded-xl px-2 py-1 bg-white" value={selectedClient.serviceLevel} onChange={(e) => updateServiceLevel(selectedClient.id, e.target.value)}>
+                      {SERVICE_LEVELS.map(sl => <option key={sl} value={sl}>{sl}</option>)}
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-gray-600">Safe Harbor Target ($):</span>
+                    <input
+                      type="number"
+                      className="border rounded-xl px-3 py-2 w-40"
+                      value={selectedClient.safeHarbor ?? 0}
+                      onChange={(e) => updateSafeHarbor(selectedClient.id, e.target.value)}
+                      min={0}
+                    />
+                  </div>
                 </div>
               </CardContent>
             </Card>
@@ -311,7 +434,7 @@ export default function TaxPlanningDashboard() {
                 <div className="flex gap-2">
                   <Button className="btn-soft" onClick={() => addOrUpdatePayment(selectedClient)}>+ Add/Update Payment</Button>
                 </div>
-                <div className="grid md:grid-cols-4 gap-3">
+                <div className="grid md:grid-cols-5 gap-3">
                   {selectedClient.paymentRequests.map((p, i) => (
                     <Card key={i} className="rounded-xl p-3 text-sm">
                       <div className="font-semibold">{p.quarter}</div>
