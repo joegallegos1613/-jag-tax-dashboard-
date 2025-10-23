@@ -8,9 +8,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Progress } from '@/components/ui/progress'
 import { Alert } from '@/components/ui/alert'
 import { Search, Trash2 } from 'lucide-react'
-import AuthGate from '@/components/AuthGate'
-import { supabase } from '@/lib/supabaseClient'
-
 
 // 🔗 Shared client store (used by /clients page too)
 import {
@@ -311,7 +308,6 @@ function saveOwners(owners) {
 
 function OwnerSelect({ owners, value, onChange, placeholder = 'Select owner' }) {
   return (
-  <AuthGate>
     <select
       className="border rounded-lg px-2 py-1 bg-white w-full"
       value={value || ''}
@@ -320,10 +316,9 @@ function OwnerSelect({ owners, value, onChange, placeholder = 'Select owner' }) 
       <option value="">{placeholder}</option>
       {owners.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
     </select>
-  </AuthGate>
-)
-
+  )
 }
+
 
 // Owners Management Page (SST)
 function OwnersSST({ owners, setOwners, onGoBoard }) {
