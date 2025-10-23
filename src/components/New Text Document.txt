@@ -1,0 +1,304 @@
+import React, { useEffect, useMemo, useState } from "react";
+
+// Drop this component anywhere in your app (e.g., <ClientManager />)
+// It provides: Add client, edit Entity Type, Client Name, and a free-form Notes field.
+// - Tailwind for styling
+// - LocalStorage persistence (key: jag_clients)
+// - Inline row editing with Cancel/Save
+
+const ENTITY_TYPES = [
+  "S-Corp",
+  "C-Corp",
+  "Partnership",
+  "LLC (Disregarded)",
+  "Sole Prop",
+  "Trust/Estate",
+  "Other",
+];
+
+function uid() {
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function useLocalStorage(key, initialValue) {
+  const [value, setValue] = useState(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : initialValue;
+    } catch {
+      return initialValue;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {}
+  }, [key, value]);
+
+  return [value, setValue];
+}
+
+export default function ClientManager() {
+  const [clients, setClients] = useLocalStorage("jag_clients", []);
+
+  // Add form state
+  const [newClient, setNewClient] = useState({
+    entityType: "S-Corp",
+    name: "",
+    notes: "",
+  });
+
+  // Editing state (per row)
+  const [editingId, setEditingId] = useState(null);
+  const [draft, setDraft] = useState({ entityType: "", name: "", notes: "" });
+
+  const isEditing = (id) => editingId === id;
+
+  const handleAdd = (e) => {
+    e.preventDefault();
+    const trimmed = newClient.name.trim();
+    if (!trimmed) return;
+    const client = { id: uid(), ...newClient, name: trimmed };
+    setClients((prev) => [client, ...prev]);
+    setNewClient({ entityType: "S-Corp", name: "", notes: "" });
+  };
+
+  const startEdit = (client) => {
+    setEditingId(client.id);
+    setDraft({ entityType: client.entityType, name: client.name, notes: client.notes || "" });
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setDraft({ entityType: "", name: "", notes: "" });
+  };
+
+  const saveEdit = (id) => {
+    const name = draft.name.trim();
+    if (!name) return; // simple validation: require a name
+    setClients((prev) => prev.map((c) => (c.id === id ? { ...c, ...draft, name } : c)));
+    cancelEdit();
+  };
+
+  const removeClient = (id) => {
+    setClients((prev) => prev.filter((c) => c.id !== id));
+    if (editingId === id) cancelEdit();
+  };
+
+  const [query, setQuery] = useState("");
+  const filtered = useMemo(() => {
+    if (!query.trim()) return clients;
+    const q = query.toLowerCase();
+    return clients.filter((c) =>
+      [c.name, c.entityType, c.notes].some((v) => (v || "").toLowerCase().includes(q))
+    );
+  }, [clients, query]);
+
+  return (
+    <div className="mx-auto max-w-6xl p-6">
+      <h1 className="text-2xl font-semibold tracking-tight">Client Manager</h1>
+      <p className="mt-1 text-sm text-gray-600">Add new clients and edit Entity Type, Client Name, and general Notes.</p>
+
+      {/* Add Client Card */}
+      <div className="mt-6 rounded-2xl border bg-white p-6 shadow-sm">
+        <h2 className="mb-4 text-lg font-medium">Add New Client</h2>
+        <form onSubmit={handleAdd} className="grid gap-4 sm:grid-cols-2">
+          <div className="flex flex-col gap-1">
+            <label className="text-sm font-medium">Entity Type</label>
+            <select
+              className="rounded-xl border p-2 focus:outline-none focus:ring"
+              value={newClient.entityType}
+              onChange={(e) => setNewClient((s) => ({ ...s, entityType: e.target.value }))}
+            >
+              {ENTITY_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-sm font-medium">Client Name</label>
+            <input
+              className="rounded-xl border p-2 focus:outline-none focus:ring"
+              placeholder="e.g., Riverstone Ventures LLC"
+              value={newClient.name}
+              onChange={(e) => setNewClient((s) => ({ ...s, name: e.target.value }))}
+            />
+          </div>
+
+          <div className="sm:col-span-2 flex flex-col gap-1">
+            <label className="text-sm font-medium">Notes (optional)</label>
+            <textarea
+              className="min-h-[80px] rounded-xl border p-2 focus:outline-none focus:ring"
+              placeholder="Any general notes about this client..."
+              value={newClient.notes}
+              onChange={(e) => setNewClient((s) => ({ ...s, notes: e.target.value }))}
+            />
+          </div>
+
+          <div className="sm:col-span-2">
+            <button
+              type="submit"
+              className="rounded-2xl bg-black px-4 py-2 text-white shadow hover:opacity-90"
+            >
+              Add Client
+            </button>
+          </div>
+        </form>
+      </div>
+
+      {/* Search */}
+      <div className="mt-6 flex items-center gap-3">
+        <input
+          className="w-full rounded-2xl border p-2 focus:outline-none focus:ring"
+          placeholder="Search by name, entity type, or note..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <span className="text-sm text-gray-500">{filtered.length} result{filtered.length === 1 ? "" : "s"}</span>
+      </div>
+
+      {/* Clients Table */}
+      <div className="mt-4 overflow-hidden rounded-2xl border bg-white shadow-sm">
+        <table className="min-w-full text-left text-sm">
+          <thead className="bg-gray-50 text-gray-700">
+            <tr>
+              <th className="px-4 py-3">Entity Type</th>
+              <th className="px-4 py-3">Client Name</th>
+              <th className="px-4 py-3">Notes</th>
+              <th className="px-4 py-3 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={4} className="px-4 py-10 text-center text-gray-500">
+                  No clients yet.
+                </td>
+              </tr>
+            )}
+            {filtered.map((client) => (
+              <tr key={client.id} className="border-t">
+                <td className="px-4 py-3 align-top">
+                  {isEditing(client.id) ? (
+                    <select
+                      className="w-full rounded-xl border p-2 focus:outline-none focus:ring"
+                      value={draft.entityType}
+                      onChange={(e) => setDraft((d) => ({ ...d, entityType: e.target.value }))}
+                    >
+                      {ENTITY_TYPES.map((t) => (
+                        <option key={t} value={t}>
+                          {t}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="inline-block rounded-full bg-gray-100 px-3 py-1 text-xs font-medium">
+                      {client.entityType}
+                    </span>
+                  )}
+                </td>
+                <td className="px-4 py-3 align-top">
+                  {isEditing(client.id) ? (
+                    <input
+                      className="w-full rounded-xl border p-2 focus:outline-none focus:ring"
+                      value={draft.name}
+                      onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+                    />
+                  ) : (
+                    <div className="font-medium">{client.name}</div>
+                  )}
+                </td>
+                <td className="px-4 py-3 align-top">
+                  {isEditing(client.id) ? (
+                    <textarea
+                      className="w-full min-h-[70px] rounded-xl border p-2 focus:outline-none focus:ring"
+                      value={draft.notes}
+                      onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))}
+                      placeholder="Add general notes..."
+                    />
+                  ) : (
+                    <div className="max-w-prose whitespace-pre-wrap text-gray-700">
+                      {client.notes || <span className="text-gray-400">—</span>}
+                    </div>
+                  )}
+                </td>
+                <td className="px-4 py-3 align-top">
+                  {isEditing(client.id) ? (
+                    <div className="flex justify-end gap-2">
+                      <button
+                        onClick={() => saveEdit(client.id)}
+                        className="rounded-xl bg-black px-3 py-1.5 text-white hover:opacity-90"
+                      >
+                        Save
+                      </button>
+                      <button
+                        onClick={cancelEdit}
+                        className="rounded-xl border px-3 py-1.5 hover:bg-gray-50"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex justify-end gap-2">
+                      <button
+                        onClick={() => startEdit(client)}
+                        className="rounded-xl border px-3 py-1.5 hover:bg-gray-50"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => removeClient(client.id)}
+                        className="rounded-xl border px-3 py-1.5 text-red-600 hover:bg-red-50"
+                        title="Remove client"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Helper / Import-Export */}
+      <div className="mt-6 grid gap-3 sm:grid-cols-2">
+        <button
+          className="rounded-2xl border px-4 py-2 hover:bg-gray-50"
+          onClick={() => {
+            const text = JSON.stringify(clients, null, 2);
+            navigator.clipboard.writeText(text);
+            alert("Client list copied to clipboard as JSON.");
+          }}
+        >
+          Copy Clients as JSON
+        </button>
+
+        <button
+          className="rounded-2xl border px-4 py-2 hover:bg-gray-50"
+          onClick={() => {
+            const raw = prompt("Paste JSON to replace clients:");
+            if (!raw) return;
+            try {
+              const arr = JSON.parse(raw);
+              if (!Array.isArray(arr)) throw new Error("Invalid format");
+              setClients(arr);
+            } catch (e) {
+              alert("Invalid JSON.");
+            }
+          }}
+        >
+          Replace from JSON
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+---

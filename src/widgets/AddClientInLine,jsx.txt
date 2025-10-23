@@ -1,0 +1,70 @@
+import React from "react";
+import { addClient } from "../store/clientsStore";
+
+const ENTITY_TYPES = [
+  "S-Corp",
+  "C-Corp",
+  "Partnership",
+  "LLC (Disregarded)",
+  "Sole Prop",
+  "Trust/Estate",
+  "Other",
+];
+
+export default function AddClientInline() {
+  const [name, setName] = React.useState("");
+  const [entityType, setEntityType] = React.useState("S-Corp");
+  const [notes, setNotes] = React.useState("");
+
+  function onSubmit(e) {
+    e.preventDefault();
+    if (!name.trim()) return;
+    addClient({ name, entityType, notes });
+    setName("");
+    setEntityType("S-Corp");
+    setNotes("");
+  }
+
+  return (
+    <form onSubmit={onSubmit} className="grid gap-3 sm:grid-cols-2 rounded-2xl border bg-white p-4 shadow-sm">
+      <div className="flex flex-col gap-1">
+        <label className="text-sm font-medium">Entity Type</label>
+        <select
+          className="rounded-xl border p-2 focus:outline-none focus:ring"
+          value={entityType}
+          onChange={(e) => setEntityType(e.target.value)}
+        >
+          {ENTITY_TYPES.map((t) => (
+            <option key={t} value={t}>{t}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <label className="text-sm font-medium">Client Name</label>
+        <input
+          className="rounded-xl border p-2 focus:outline-none focus:ring"
+          placeholder="e.g., Riverstone Ventures LLC"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+      </div>
+
+      <div className="sm:col-span-2 flex flex-col gap-1">
+        <label className="text-sm font-medium">Notes (optional)</label>
+        <textarea
+          className="min-h-[70px] rounded-xl border p-2 focus:outline-none focus:ring"
+          placeholder="Any general notes about this client..."
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+        />
+      </div>
+
+      <div className="sm:col-span-2">
+        <button type="submit" className="rounded-2xl bg-black px-4 py-2 text-white shadow hover:opacity-90">
+          Add Client
+        </button>
+      </div>
+    </form>
+  );
+}
