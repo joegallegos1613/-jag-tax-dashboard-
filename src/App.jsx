@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState, useTransition } from 'react'
 import './index.css'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Progress } from '@/components/ui/progress'
 import { Alert } from '@/components/ui/alert'
-import { Search, CheckCircle2, Trash2 } from 'lucide-react'
+import { Search, Trash2 } from 'lucide-react'
 
 // 🔗 Shared client store (used by /clients page too)
 import {
@@ -36,7 +36,7 @@ const DEFAULT_CLIENTS = [
     risk: 'High',
     status: 'Active',
     year: 2024,
-    safeHarbor: 65000, // legacy single-year; we fall back to this when year map missing
+    safeHarbor: 65000,
     deliverablesProgress: 75,
     estimateOwner: 'Averey',
     meetingOwner: 'Joe',
@@ -188,7 +188,6 @@ function totalPaidForYear(clientLike, taxYear) {
 
 // --------- Safe Harbor per-year helpers ---------
 function getSafeHarbor(clientLike, taxYear) {
-  // prefer map; else fall back to legacy single value
   const map = clientLike.safeHarborByYear || {}
   const val = map[taxYear]
   if (typeof val === 'number') return val
@@ -200,7 +199,6 @@ function setSafeHarborForYear(stateSetter, clientId, taxYear, newValue) {
   stateSetter(prev => prev.map(c => {
     if (c.id !== clientId) return c
     const nextMap = { ...(c.safeHarborByYear || {}) , [taxYear]: val }
-    // keep legacy safeHarbor in sync when the edited year equals c.year
     const legacy = Number(c.year) === Number(taxYear) ? val : (c.safeHarbor ?? 0)
     return { ...c, safeHarborByYear: nextMap, safeHarbor: legacy }
   }))
@@ -249,6 +247,21 @@ export default function TaxPlanningDashboard() {
     } catch { return DEFAULT_CLIENTS }
   })
 
+  // ✅ Idle/debounced persistence — avoids blocking the main thread on every tiny update
+  useEffect(() => {
+    let t
+    const write = () => {
+      try { localStorage.setItem('jag_clients_dashboard', JSON.stringify(clients)) } catch {}
+    }
+    if ('requestIdleCallback' in window) {
+      const id = window.requestIdleCallback(write)
+      return () => window.cancelIdleCallback(id)
+    } else {
+      t = setTimeout(write, 250)
+      return () => clearTimeout(t)
+    }
+  }, [clients])
+
   // hydrate store if empty once
   useEffect(() => {
     const storeClients = storeGetClients()
@@ -296,7 +309,6 @@ export default function TaxPlanningDashboard() {
             dashById.get(s.id).entity = s.entityType || dashById.get(s.id).entity
           }
         }
-        localStorage.setItem('jag_clients_dashboard', JSON.stringify(dash))
         return dash
       })
     }
@@ -305,16 +317,13 @@ export default function TaxPlanningDashboard() {
     return unsub
   }, [])
 
-  useEffect(() => {
-    localStorage.setItem('jag_clients_dashboard', JSON.stringify(clients))
-  }, [clients])
-
   // UI state
   const [yearFilter, setYearFilter] = useState('All')
   const [risk, setRisk] = useState('All')
   const [query, setQuery] = useState('')
   const [selectedClient, setSelectedClient] = useState(null)
   const [selectedYear, setSelectedYear] = useState(null)
+  const [isPending, startTransition] = useTransition()
 
   const storeClients = storeGetClients()
   const expandedRows = useMemo(() => expandRows(clients, storeClients), [clients, storeClients])
@@ -327,6 +336,7 @@ export default function TaxPlanningDashboard() {
     )
   }, [expandedRows, yearFilter, risk, query])
 
+  // 🔄 Keep selection valid and FRESH from canonical clients to avoid stale-object lags
   useEffect(() => {
     if (!selectedClient) return
     const hasRow = expandedRows.find(r => r.id === selectedClient.id && r.rowYear === selectedYear)
@@ -334,10 +344,43 @@ export default function TaxPlanningDashboard() {
       const fallback = selectedClient.year || (storeClients.find(s => s.id === selectedClient.id)?.years?.[0])
       setSelectedYear(Number(fallback || new Date().getFullYear()))
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedClient, expandedRows])
+  }, [selectedClient, expandedRows, selectedYear, storeClients])
 
-  // ------- CRUD helpers (write to both: dashboard + store) -------
+  const selectedClientFresh = useMemo(() => {
+    if (!selectedClient) return null
+    return clients.find(c => c.id === selectedClient.id) || selectedClient
+  }, [clients, selectedClient])
+
+  // ✍️ Draft inputs (so typing never spams global state)
+  const [draftSafeHarbor, setDraftSafeHarbor] = useState('')
+  const [draftServiceLevel, setDraftServiceLevel] = useState('Clarity')
+
+  useEffect(() => {
+    if (!selectedClientFresh || !selectedYear) return
+    const v = getSafeHarbor(selectedClientFresh, selectedYear)
+    setDraftSafeHarbor(String(v ?? 0))
+    setDraftServiceLevel(selectedClientFresh.serviceLevel || 'Clarity')
+  }, [selectedClientFresh, selectedYear])
+
+  function commitSafeHarbor() {
+    if (!selectedClientFresh) return
+    const val = Number(String(draftSafeHarbor).replace(/[, ]/g, ''))
+    if (!Number.isFinite(val)) {
+      setDraftSafeHarbor(String(getSafeHarbor(selectedClientFresh, selectedYear) ?? 0))
+      return
+    }
+    setSafeHarborForYear(setClients, selectedClientFresh.id, selectedYear, val)
+  }
+
+  function commitServiceLevel(level) {
+    if (!selectedClientFresh) return
+    setDraftServiceLevel(level)
+    startTransition(() => {
+      setClients(prev => prev.map(pc => pc.id === selectedClientFresh.id ? { ...pc, serviceLevel: level } : pc))
+    })
+  }
+
+  // ------- CRUD helpers (wrap heavier list updates in transitions) -------
   function addClient() {
     const group = prompt('Client/Group name (e.g., CB Direct, LLC):'); if (!group) return
     const client = prompt('Primary contact (e.g., Michael Cain):') || ''
@@ -351,7 +394,7 @@ export default function TaxPlanningDashboard() {
       id, group, client, entity, serviceLevel, risk: 'Low', status: 'Active',
       year: taxYear,
       safeHarbor: 0,
-      safeHarborByYear: { [taxYear]: 0 }, // seed per-year map
+      safeHarborByYear: { [taxYear]: 0 },
       deliverablesProgress: 0, strategies: [], deliverables: [],
       estimateOwner: '', meetingOwner: '', requestOwner: '',
       paymentRequests: [
@@ -363,24 +406,22 @@ export default function TaxPlanningDashboard() {
       ]
     }
 
-    setClients(prev => {
-      const next = [newClient, ...prev]
-      localStorage.setItem('jag_clients_dashboard', JSON.stringify(next))
-      return next
+    startTransition(() => {
+      setClients(prev => [newClient, ...prev])
+      storeAddClient({ id, name: group, entityType: entity, notes: '', taxYear })
+      setSelectedClient(newClient)
+      setSelectedYear(taxYear)
     })
-
-    storeAddClient({ id, name: group, entityType: entity, notes: '', taxYear })
-    setSelectedClient(newClient)
-    setSelectedYear(taxYear)
   }
 
   function deleteClient(clientId) {
     if (!confirm('Delete this client? This action cannot be undone.')) return
-    const filteredClients = clients.filter(c => c.id !== clientId)
-    setClients(filteredClients)
-    setSelectedClient(null)
-    const keep = storeClients.filter(s => s.id !== clientId)
-    storeSetClients(keep)
+    startTransition(() => {
+      setClients(prev => prev.filter(c => c.id !== clientId))
+      setSelectedClient(null)
+      const keep = storeClients.filter(s => s.id !== clientId)
+      storeSetClients(keep)
+    })
   }
 
   function addOrUpdatePayment(c) {
@@ -399,28 +440,32 @@ export default function TaxPlanningDashboard() {
 
     const taxYear = Number(selectedYear || c.year || new Date().getFullYear())
 
-    setClients(prev => prev.map(pc => {
-      if (pc.id !== c.id) return pc
-      const ensureExt = arr =>
-        arr.some(p => p.quarter === 'Extension')
-          ? arr
-          : [...arr, { quarter: 'Extension', requestDate: null, amount: null, status: 'Pending', owner: null, taxYear }]
-      const base = ensureExt(pc.paymentRequests || [])
-      const paymentRequests = base.map(p =>
-        p.quarter === normalizedQuarter
-          ? { quarter: normalizedQuarter, requestDate, amount, status, owner, taxYear }
-          : p
-      )
-      return { ...pc, paymentRequests }
-    }))
+    startTransition(() => {
+      setClients(prev => prev.map(pc => {
+        if (pc.id !== c.id) return pc
+        const ensureExt = arr =>
+          arr.some(p => p.quarter === 'Extension')
+            ? arr
+            : [...arr, { quarter: 'Extension', requestDate: null, amount: null, status: 'Pending', owner: null, taxYear }]
+        const base = ensureExt(pc.paymentRequests || [])
+        const paymentRequests = base.map(p =>
+          p.quarter === normalizedQuarter
+            ? { quarter: normalizedQuarter, requestDate, amount, status, owner, taxYear }
+            : p
+        )
+        return { ...pc, paymentRequests }
+      }))
+    })
   }
 
   function updatePaymentStatus(clientId, quarter, newStatus) {
-    setClients(prev => prev.map(pc => {
-      if (pc.id !== clientId) return pc
-      const paymentRequests = pc.paymentRequests.map(p => p.quarter === quarter ? { ...p, status: newStatus } : p)
-      return { ...pc, paymentRequests }
-    }))
+    startTransition(() => {
+      setClients(prev => prev.map(pc => {
+        if (pc.id !== clientId) return pc
+        const paymentRequests = pc.paymentRequests.map(p => p.quarter === quarter ? { ...p, status: newStatus } : p)
+        return { ...pc, paymentRequests }
+      }))
+    })
   }
 
   function updateServiceLevel(clientId, newLevel) {
@@ -431,7 +476,6 @@ export default function TaxPlanningDashboard() {
     setSafeHarborForYear(setClients, clientId, selectedYear, newValue)
   }
 
-  // Deliverables — year-stamped & filtered
   function addDeliverable(c, preset) {
     const taxYear = Number(selectedYear || c.year || new Date().getFullYear())
     const type = preset?.type || prompt(`Type (${DELIVERABLE_TYPES.join(' / ')}):`, 'Estimate') || 'Estimate'
@@ -440,23 +484,29 @@ export default function TaxPlanningDashboard() {
     const status = preset?.status || prompt(`Status (${DELIVERABLE_STATUSES.join(' / ')}):`, 'Planned') || 'Planned'
     const notes = preset?.notes ?? (prompt('Notes (optional):', '') || '')
     const item = { id: `${Date.now()}`, type, date, owner, status, notes, taxYear }
-    setClients(prev => prev.map(pc => pc.id !== c.id ? pc : { ...pc, deliverables: [item, ...(pc.deliverables || [])] }))
+    startTransition(() => {
+      setClients(prev => prev.map(pc => pc.id !== c.id ? pc : { ...pc, deliverables: [item, ...(pc.deliverables || [])] }))
+    })
   }
 
   function deleteDeliverable(clientId, deliverableId) {
-    setClients(prev => prev.map(pc => pc.id !== clientId ? pc : { ...pc, deliverables: (pc.deliverables || []).filter(d => d.id !== deliverableId) }))
+    startTransition(() => {
+      setClients(prev => prev.map(pc => pc.id !== clientId ? pc : { ...pc, deliverables: (pc.deliverables || []).filter(d => d.id !== deliverableId) }))
+    })
   }
 
   function updateDeliverable(clientId, deliverableId, patch) {
-    setClients(prev => prev.map(pc => {
-      if (pc.id !== clientId) return pc
-      const deliverables = (pc.deliverables || []).map(d => {
-        if (d.id !== deliverableId) return d
-        const newTaxYear = patch.date ? (yearOf(patch.date) ?? selectedYear ?? pc.year) : d.taxYear
-        return { ...d, ...patch, taxYear: newTaxYear }
-      })
-      return { ...pc, deliverables }
-    }))
+    startTransition(() => {
+      setClients(prev => prev.map(pc => {
+        if (pc.id !== clientId) return pc
+        const deliverables = (pc.deliverables || []).map(d => {
+          if (d.id !== deliverableId) return d
+          const newTaxYear = patch.date ? (yearOf(patch.date) ?? selectedYear ?? pc.year) : d.taxYear
+          return { ...d, ...patch, taxYear: newTaxYear }
+        })
+        return { ...pc, deliverables }
+      }))
+    })
   }
 
   // ----------------------------------------------
@@ -468,6 +518,7 @@ export default function TaxPlanningDashboard() {
       <div className="app-hero px-6 pt-8 pb-6">
         <div className="flex items-center justify-between">
           <h1 className="text-3xl font-semibold tracking-tight">JAG — Client-Level Tax Planning</h1>
+          {isPending && <span className="text-xs opacity-60">Updating…</span>}
         </div>
 
         <div className="mt-4 flex gap-3 items-center">
@@ -477,29 +528,29 @@ export default function TaxPlanningDashboard() {
           </div>
 
           {/* Tax Year filter */}
-          <select className="border rounded-xl px-3 py-2 bg-white" value={yearFilter} onChange={(e) => setYearFilter(e.target.value)} disabled={!!selectedClient}>
+          <select className="border rounded-xl px-3 py-2 bg-white" value={yearFilter} onChange={(e) => setYearFilter(e.target.value)} disabled={!!selectedClientFresh}>
             <option value="All">All Tax Years</option>
             {[...new Set(expandedRows.map(r => r.rowYear))].sort((a,b)=>a-b).map(y => (
               <option key={y} value={y}>{y}</option>
             ))}
           </select>
 
-          <select className="border rounded-xl px-3 py-2 bg-white" value={risk} onChange={(e) => setRisk(e.target.value)} disabled={!!selectedClient}>
+          <select className="border rounded-xl px-3 py-2 bg-white" value={risk} onChange={(e) => setRisk(e.target.value)} disabled={!!selectedClientFresh}>
             {['All','Low','Medium','High'].map(r => <option key={r} value={r}>{r}</option>)}
           </select>
 
-          {!selectedClient && <Button onClick={addClient}>+ Add Client</Button>}
-          {selectedClient && (
+          {!selectedClientFresh && <Button onClick={addClient}>+ Add Client</Button>}
+          {selectedClientFresh && (
             <>
               <Button className="btn-soft" onClick={() => { setSelectedClient(null); setSelectedYear(null) }}>← Back to Dashboard</Button>
-              <Button className="btn-soft" onClick={() => deleteClient(selectedClient.id)} title="Delete client">🗑 Delete Client</Button>
+              <Button className="btn-soft" onClick={() => deleteClient(selectedClientFresh.id)} title="Delete client">🗑 Delete Client</Button>
             </>
           )}
         </div>
       </div>
 
-      {/* Table: one row per (client × year) with YTD Paid and year-scoped Safe Harbor */}
-      {!selectedClient && (
+      {/* Table */}
+      {!selectedClientFresh && (
         <div className="px-6 -mt-6">
           <Card className="rounded-2xl">
             <CardContent className="p-4 space-y-3">
@@ -546,30 +597,30 @@ export default function TaxPlanningDashboard() {
         </div>
       )}
 
-      {/* Detail drawer (year-scoped KPIs, Payments, Deliverables, Safe Harbor editor) */}
-      {selectedClient && (() => {
-        const alerts = getAlertsForYear(selectedClient, selectedYear)
+      {/* Detail drawer */}
+      {selectedClientFresh && (() => {
+        const alerts = getAlertsForYear(selectedClientFresh, selectedYear)
         const tone = alerts.some(a => a.level === 'error') ? 'err' : alerts.some(a => a.level === 'warn') ? 'warn' : 'ok'
         const title = tone === 'err' ? 'Issues detected' : tone === 'warn' ? 'Action recommended' : 'All good'
 
-        const { estimatesSent, meetingsHeld, requestsSent } = kpisFromDeliverablesForYear(selectedClient, selectedYear)
+        const { estimatesSent, meetingsHeld, requestsSent } = kpisFromDeliverablesForYear(selectedClientFresh, selectedYear)
 
-        const paymentsForYear = (selectedClient.paymentRequests || []).filter(p => {
-          const y = p.taxYear ?? yearOf(p.requestDate) ?? selectedClient.year ?? null
+        const paymentsForYear = (selectedClientFresh.paymentRequests || []).filter(p => {
+          const y = p.taxYear ?? yearOf(p.requestDate) ?? selectedClientFresh.year ?? null
           return Number(y) === Number(selectedYear)
         })
 
-        const deliverablesForYear = (selectedClient.deliverables || []).filter(d => {
-          const y = d.taxYear ?? yearOf(d.date) ?? selectedClient.year ?? null
+        const deliverablesForYear = (selectedClientFresh.deliverables || []).filter(d => {
+          const y = d.taxYear ?? yearOf(d.date) ?? selectedClientFresh.year ?? null
           return Number(y) === Number(selectedYear)
         })
 
-        const safeHarborForYear = getSafeHarbor(selectedClient, selectedYear)
+        const safeHarborForYear = getSafeHarbor(selectedClientFresh, selectedYear)
 
         return (
           <div className="px-6 mt-6 space-y-4">
             <div className="text-sm text-gray-500">
-              Editing for <span className="font-semibold">{selectedClient.group}</span> · <span className="font-semibold">Tax Year {selectedYear}</span>
+              Editing for <span className="font-semibold">{selectedClientFresh.group}</span> · <span className="font-semibold">Tax Year {selectedYear}</span>
             </div>
 
             <Alert tone={tone} title={title}>
@@ -580,31 +631,45 @@ export default function TaxPlanningDashboard() {
               )}
             </Alert>
 
-            {/* KPI quick actions + Safe Harbor (year-scoped) */}
+            {/* KPI quick actions + Safe Harbor */}
             <Card>
               <CardContent className="flex flex-wrap gap-3 items-center">
                 <div className="text-sm text-gray-600">
                   Safe Harbor Target ($):
                   <input
-                    type="number"
+                    type="text"
                     className="border rounded-xl px-3 py-2 w-40 ml-2"
-                    value={safeHarborForYear ?? 0}
-                    min={0}
-                    onChange={(e) => updateSafeHarborForSelectedYear(selectedClient.id, e.target.value)}
+                    value={draftSafeHarbor}
+                    onChange={(e) => setDraftSafeHarbor(e.target.value)}
+                    onBlur={commitSafeHarbor}
+                    onKeyDown={(e) => { if (e.key === 'Enter') commitSafeHarbor() }}
                   />
+                  <span className="ml-2 text-xs opacity-60">
+                    Canonical: {(safeHarborForYear ?? 0).toLocaleString()}
+                  </span>
+                </div>
+
+                <div className="text-sm text-gray-600">Service Level:
+                  <select
+                    className="border rounded-xl px-2 py-1 ml-2 bg-white"
+                    value={draftServiceLevel}
+                    onChange={(e) => commitServiceLevel(e.target.value)}
+                  >
+                    {SERVICE_LEVELS.map(sl => <option key={sl} value={sl}>{sl}</option>)}
+                  </select>
                 </div>
 
                 <div className="text-sm text-gray-600">Estimates Sent: <span className="font-semibold">{estimatesSent}</span></div>
-                <Button className="btn-soft" onClick={() => addDeliverable(selectedClient, { type: 'Estimate', status: 'Sent', owner: selectedClient.estimateOwner || 'Unassigned', date: today(), notes: 'Estimate sent' })}>+ Estimate</Button>
+                <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Estimate', status: 'Sent', owner: selectedClientFresh.estimateOwner || 'Unassigned', date: today(), notes: 'Estimate sent' })}>+ Estimate</Button>
 
                 <div className="text-sm text-gray-600">Meetings Held: <span className="font-semibold">{meetingsHeld}</span></div>
-                <Button className="btn-soft" onClick={() => addDeliverable(selectedClient, { type: 'Meeting', status: 'Completed', owner: selectedClient.meetingOwner || 'Unassigned', date: today(), notes: 'Planning meeting' })}>+ Meeting</Button>
+                <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Meeting', status: 'Completed', owner: selectedClientFresh.meetingOwner || 'Unassigned', date: today(), notes: 'Planning meeting' })}>+ Meeting</Button>
 
                 <div className="text-sm text-gray-600">Requests Sent: <span className="font-semibold">{requestsSent}</span></div>
-                <Button className="btn-soft" onClick={() => addDeliverable(selectedClient, { type: 'Info Request', status: 'Requested', owner: selectedClient.requestOwner || 'Unassigned', date: today(), notes: 'Docs requested' })}>+ Info Request</Button>
+                <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Info Request', status: 'Requested', owner: selectedClientFresh.requestOwner || 'Unassigned', date: today(), notes: 'Docs requested' })}>+ Info Request</Button>
 
                 <div className="ml-auto text-sm text-gray-600">
-                  YTD Paid: <span className="font-semibold">${totalPaidForYear(selectedClient, selectedYear).toLocaleString()}</span>
+                  YTD Paid: <span className="font-semibold">${totalPaidForYear(selectedClientFresh, selectedYear).toLocaleString()}</span>
                 </div>
               </CardContent>
             </Card>
@@ -616,10 +681,10 @@ export default function TaxPlanningDashboard() {
                 <TabsTrigger value="strategies">Strategies</TabsTrigger>
               </TabsList>
 
-              {/* PAYMENTS (year-scoped) */}
+              {/* PAYMENTS */}
               <TabsContent value="payments" className="mt-2 text-sm text-gray-700 space-y-3">
                 <div className="flex gap-2">
-                  <Button className="btn-soft" onClick={() => addOrUpdatePayment(selectedClient)}>+ Add/Update Payment</Button>
+                  <Button className="btn-soft" onClick={() => addOrUpdatePayment(selectedClientFresh)}>+ Add/Update Payment</Button>
                 </div>
                 <div className="grid md:grid-cols-5 gap-3">
                   {paymentsForYear.map((p, i) => (
@@ -632,25 +697,25 @@ export default function TaxPlanningDashboard() {
                         <select
                           className="border rounded-lg px-2 py-1 bg-white"
                           value={p.status || 'Pending'}
-                          onChange={(e) => updatePaymentStatus(selectedClient.id, p.quarter, e.target.value)}
+                          onChange={(e) => updatePaymentStatus(selectedClientFresh.id, p.quarter, e.target.value)}
                         >
                           {PAYMENT_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
                         </select>
                       </div>
                       <div className="text-gray-600">Owner: {p.owner || 'Unassigned'}</div>
-                      <div className="text-gray-400 text-xs">Tax Year: {p.taxYear ?? (yearOf(p.requestDate) ?? selectedClient.year)}</div>
+                      <div className="text-gray-400 text-xs">Tax Year: {p.taxYear ?? (yearOf(p.requestDate) ?? selectedClientFresh.year)}</div>
                     </Card>
                   ))}
                 </div>
               </TabsContent>
 
-              {/* DELIVERABLES (year-scoped) */}
+              {/* DELIVERABLES */}
               <TabsContent value="deliverables" className="mt-2 text-sm text-gray-700 space-y-2">
                 <div className="flex gap-2">
-                  <Button className="btn-soft" onClick={() => addDeliverable(selectedClient)}>+ Add Deliverable</Button>
-                  <Button className="btn-soft" onClick={() => addDeliverable(selectedClient, { type: 'Estimate', status: 'Sent', owner: selectedClient.estimateOwner || 'Unassigned', date: today(), notes: 'Estimate sent' })}>+ Quick Estimate</Button>
-                  <Button className="btn-soft" onClick={() => addDeliverable(selectedClient, { type: 'Meeting', status: 'Completed', owner: selectedClient.meetingOwner || 'Unassigned', date: today(), notes: 'Meeting held' })}>+ Quick Meeting</Button>
-                  <Button className="btn-soft" onClick={() => addDeliverable(selectedClient, { type: 'Info Request', status: 'Requested', owner: selectedClient.requestOwner || 'Unassigned', date: today(), notes: 'Docs requested' })}>+ Quick Request</Button>
+                  <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh)}>+ Add Deliverable</Button>
+                  <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Estimate', status: 'Sent', owner: selectedClientFresh.estimateOwner || 'Unassigned', date: today(), notes: 'Estimate sent' })}>+ Quick Estimate</Button>
+                  <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Meeting', status: 'Completed', owner: selectedClientFresh.meetingOwner || 'Unassigned', date: today(), notes: 'Meeting held' })}>+ Quick Meeting</Button>
+                  <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Info Request', status: 'Requested', owner: selectedClientFresh.requestOwner || 'Unassigned', date: today(), notes: 'Docs requested' })}>+ Quick Request</Button>
                 </div>
 
                 {(deliverablesForYear.length ?? 0) === 0 && <p className="text-gray-600">No deliverables for {selectedYear} yet.</p>}
@@ -671,7 +736,7 @@ export default function TaxPlanningDashboard() {
                       {deliverablesForYear.map((d) => (
                         <tr key={d.id} className="align-top">
                           <td className="p-2 border">
-                            <select className="border rounded-lg px-2 py-1 bg-white" value={d.type} onChange={(e) => updateDeliverable(selectedClient.id, d.id, { type: e.target.value })}>
+                            <select className="border rounded-lg px-2 py-1 bg-white" value={d.type} onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { type: e.target.value })}>
                               {DELIVERABLE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
                             </select>
                           </td>
@@ -680,23 +745,23 @@ export default function TaxPlanningDashboard() {
                               type="date"
                               className="border rounded-lg px-2 py-1"
                               value={d.date || ''}
-                              onChange={(e) => updateDeliverable(selectedClient.id, d.id, { date: e.target.value })}
+                              onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { date: e.target.value })}
                             />
-                            <div className="text-[10px] text-gray-400 mt-0.5">Tax Year: {d.taxYear ?? (yearOf(d.date) ?? selectedClient.year)}</div>
+                            <div className="text-[10px] text-gray-400 mt-0.5">Tax Year: {d.taxYear ?? (yearOf(d.date) ?? selectedClientFresh.year)}</div>
                           </td>
                           <td className="p-2 border">
-                            <input type="text" className="border rounded-lg px-2 py-1 w-full" value={d.owner || ''} onChange={(e) => updateDeliverable(selectedClient.id, d.id, { owner: e.target.value })} placeholder="Owner" />
+                            <input type="text" className="border rounded-lg px-2 py-1 w-full" value={d.owner || ''} onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { owner: e.target.value })} placeholder="Owner" />
                           </td>
                           <td className="p-2 border">
-                            <select className="border rounded-lg px-2 py-1 bg-white" value={d.status} onChange={(e) => updateDeliverable(selectedClient.id, d.id, { status: e.target.value })}>
+                            <select className="border rounded-lg px-2 py-1 bg-white" value={d.status} onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { status: e.target.value })}>
                               {DELIVERABLE_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
                             </select>
                           </td>
                           <td className="p-2 border">
-                            <input type="text" className="border rounded-lg px-2 py-1 w-full" value={d.notes || ''} onChange={(e) => updateDeliverable(selectedClient.id, d.id, { notes: e.target.value })} placeholder="Notes" />
+                            <input type="text" className="border rounded-lg px-2 py-1 w-full" value={d.notes || ''} onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { notes: e.target.value })} placeholder="Notes" />
                           </td>
                           <td className="p-2 border">
-                            <button className="btn-soft px-2 py-1 rounded-lg" title="Delete" onClick={() => deleteDeliverable(selectedClient.id, d.id)}>
+                            <button className="btn-soft px-2 py-1 rounded-lg" title="Delete" onClick={() => deleteDeliverable(selectedClientFresh.id, d.id)}>
                               <Trash2 className="w-4 h-4" />
                             </button>
                           </td>
@@ -708,22 +773,24 @@ export default function TaxPlanningDashboard() {
 
                 <div className="space-y-1 mt-3">
                   <div className="text-xs text-gray-500">Overall progress</div>
-                  <Progress value={selectedClient.deliverablesProgress} />
+                  <Progress value={selectedClientFresh.deliverablesProgress} />
                 </div>
               </TabsContent>
 
-              {/* STRATEGIES (not year-scoped yet; can scope if you want later) */}
+              {/* STRATEGIES */}
               <TabsContent value="strategies" className="mt-2 text-sm text-gray-700 space-y-3">
-                {(selectedClient.strategies?.length ?? 0) === 0 && <p className="text-gray-600">No strategies listed yet.</p>}
+                {(selectedClientFresh.strategies?.length ?? 0) === 0 && <p className="text-gray-600">No strategies listed yet.</p>}
                 <ul className="list-disc ml-5 space-y-1">
-                  {selectedClient.strategies?.map((s, i) => (
+                  {selectedClientFresh.strategies?.map((s, i) => (
                     <li key={i}><span className="text-gray-500 mr-2">[{s.date}]</span>{s.note}</li>
                   ))}
                 </ul>
                 <Button className="btn-soft" onClick={() => {
                   const note = prompt('Strategy note:'); if (!note) return
                   const item = { note, date: today() }
-                  setClients(prev => prev.map(pc => pc.id !== selectedClient.id ? pc : { ...pc, strategies: [item, ...(pc.strategies || [])] }))
+                  startTransition(() => {
+                    setClients(prev => prev.map(pc => pc.id !== selectedClientFresh.id ? pc : { ...pc, strategies: [item, ...(pc.strategies || [])] }))
+                  })
                 }}>Add Strategy</Button>
               </TabsContent>
             </Tabs>
