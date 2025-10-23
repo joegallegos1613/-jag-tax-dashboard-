@@ -1,0 +1,85 @@
+import React, { useMemo, useState } from 'react'
+import { useOwners } from '../context/OwnersContext'
+
+export default function OwnersPage() {
+  const { owners, addOwner, updateOwner, deleteOwner } = useOwners()
+  const [form, setForm] = useState({ name: '', email: '', role: '' })
+  const [editingId, setEditingId] = useState(null)
+
+  const sorted = useMemo(() => owners.slice().sort((a,b) => a.name.localeCompare(b.name)), [owners])
+
+  const onSubmit = (e) => {
+    e.preventDefault()
+    if (!form.name.trim()) return
+    if (editingId) {
+      updateOwner({ id: editingId, ...form })
+      setEditingId(null)
+    } else {
+      addOwner(form)
+    }
+    setForm({ name: '', email: '', role: '' })
+  }
+
+  const onEdit = (o) => {
+    setForm({ name: o.name || '', email: o.email || '', role: o.role || '' })
+    setEditingId(o.id)
+  }
+
+  const onDelete = (id) => {
+    if (confirm('Delete this owner? They will be unassigned from any deliverables.')) {
+      deleteOwner(id)
+      if (editingId === id) {
+        setEditingId(null)
+        setForm({ name: '', email: '', role: '' })
+      }
+    }
+  }
+
+  return (
+    <div className="p-4 sm:p-6">
+      <h1 className="text-2xl font-semibold mb-4">Owners — Single Source of Truth</h1>
+
+      <form onSubmit={onSubmit} className="grid gap-3 sm:grid-cols-4 bg-white rounded-2xl p-4 shadow">
+        <input
+          className="rounded-xl border p-2 sm:col-span-1"
+          placeholder="Full name"
+          value={form.name}
+          onChange={(e)=>setForm(f=>({...f,name:e.target.value}))}
+        />
+        <input
+          className="rounded-xl border p-2 sm:col-span-1"
+          placeholder="Email (optional)"
+          value={form.email}
+          onChange={(e)=>setForm(f=>({...f,email:e.target.value}))}
+        />
+        <input
+          className="rounded-xl border p-2 sm:col-span-1"
+          placeholder="Role (e.g., Partner, CIS, Analyst)"
+          value={form.role}
+          onChange={(e)=>setForm(f=>({...f,role:e.target.value}))}
+        />
+        <button className="rounded-xl bg-black text-white px-4 py-2 sm:col-span-1" type="submit">
+          {editingId ? 'Save Owner' : 'Add Owner'}
+        </button>
+      </form>
+
+      <div className="mt-6 grid gap-3">
+        {sorted.length === 0 && (
+          <div className="opacity-60">No owners yet. Add your team above.</div>
+        )}
+        {sorted.map(o => (
+          <div key={o.id} className="flex items-center justify-between bg-white rounded-2xl p-4 shadow">
+            <div>
+              <div className="font-medium">{o.name}</div>
+              <div className="text-sm opacity-70">{o.email || '—'} {o.role && (<span>· {o.role}</span>)}</div>
+            </div>
+            <div className="flex gap-2">
+              <button className="rounded-xl border px-3 py-1" onClick={()=>onEdit(o)}>Edit</button>
+              <button className="rounded-xl border px-3 py-1" onClick={()=>onDelete(o.id)}>Delete</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}

@@ -25,7 +25,12 @@ const PAYMENT_STATUSES = ['Pending', 'Sent', 'Paid']
 const DELIVERABLE_TYPES = ['Estimate', 'Info Request', 'Meeting', 'Payment Request', 'Projection', 'Return Sent', 'Strategy Memo']
 const DELIVERABLE_STATUSES = ['Planned', 'Requested', 'Sent', 'Completed']
 
-// Seed data (unchanged)
+const BOARD_TYPES = [...DELIVERABLE_TYPES]
+const BOARD_STATUSES = [...DELIVERABLE_STATUSES]
+
+// ----------------------------------------------
+// Seed data (unchanged structure, but deliverables will migrate to ownerId)
+// ----------------------------------------------
 const DEFAULT_CLIENTS = [
   {
     id: '700019-1',
@@ -236,6 +241,228 @@ function expandRows(dashboardClients, storeClients) {
 }
 
 // ----------------------------------------------
+// Owners Single Source of Truth (SST) using IDs
+// ----------------------------------------------
+const DEFAULT_OWNERS = [
+  { id: crypto.randomUUID(), name: 'Joe', email: 'joe@jagcpa.com', role: 'Partner' },
+  { id: crypto.randomUUID(), name: 'Averey', email: 'admin@jagcpa.com', role: 'CIS' },
+  { id: crypto.randomUUID(), name: 'Hector', email: 'hector@jagcpa.com', role: 'Analyst' },
+]
+
+function loadOwners() {
+  try {
+    const raw = localStorage.getItem('jag_owners_v1')
+    if (!raw) return DEFAULT_OWNERS
+    const arr = JSON.parse(raw)
+    return Array.isArray(arr) && arr.length ? arr : DEFAULT_OWNERS
+  } catch {
+    return DEFAULT_OWNERS
+  }
+}
+function saveOwners(owners) {
+  try { localStorage.setItem('jag_owners_v1', JSON.stringify(owners)) } catch {}
+}
+
+function OwnerSelect({ owners, value, onChange, placeholder = 'Select owner' }) {
+  return (
+    <select
+      className="border rounded-lg px-2 py-1 bg-white w-full"
+      value={value || ''}
+      onChange={(e) => onChange(e.target.value || null)}
+    >
+      <option value="">{placeholder}</option>
+      {owners.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+    </select>
+  )
+}
+
+// Owners Management Page (SST)
+function OwnersSST({ owners, setOwners, onGoBoard }) {
+  const [form, setForm] = useState({ name: '', email: '', role: '' })
+  const [editingId, setEditingId] = useState(null)
+
+  const sorted = useMemo(() => owners.slice().sort((a,b) => a.name.localeCompare(b.name)), [owners])
+
+  const onSubmit = (e) => {
+    e.preventDefault()
+    if (!form.name.trim()) return
+    if (editingId) {
+      const next = owners.map(o => o.id === editingId ? { ...o, ...form } : o)
+      setOwners(next); saveOwners(next)
+      setEditingId(null)
+    } else {
+      const item = { id: crypto.randomUUID(), ...form }
+      const next = [...owners, item]
+      setOwners(next); saveOwners(next)
+    }
+    setForm({ name: '', email: '', role: '' })
+  }
+
+  const onEdit = (o) => {
+    setForm({ name: o.name || '', email: o.email || '', role: o.role || '' })
+    setEditingId(o.id)
+  }
+
+  const onDelete = (id) => {
+    if (!confirm('Delete this owner? Any deliverables using this owner will be unassigned.')) return
+    const next = owners.filter(o => o.id !== id)
+    setOwners(next); saveOwners(next)
+  }
+
+  return (
+    <div className="p-4 sm:p-6">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-2xl font-semibold">Owners — Single Source of Truth</h2>
+        <Button variant="outline" onClick={onGoBoard}>Owner Board</Button>
+      </div>
+
+      <Card className="mb-5">
+        <CardContent className="p-4">
+          <form onSubmit={onSubmit} className="grid gap-3 sm:grid-cols-5">
+            <Input className="sm:col-span-2" placeholder="Full name" value={form.name} onChange={(e)=>setForm(f=>({...f,name:e.target.value}))}/>
+            <Input className="sm:col-span-2" placeholder="Email (optional)" value={form.email} onChange={(e)=>setForm(f=>({...f,email:e.target.value}))}/>
+            <Input placeholder="Role (Partner, CIS, Analyst…)" value={form.role} onChange={(e)=>setForm(f=>({...f,role:e.target.value}))}/>
+            <Button type="submit" className="sm:col-span-1">{editingId ? 'Save Owner' : 'Add Owner'}</Button>
+          </form>
+        </CardContent>
+      </Card>
+
+      <div className="grid gap-3">
+        {sorted.map(o => (
+          <Card key={o.id}>
+            <CardContent className="p-4 flex items-center justify-between">
+              <div>
+                <div className="font-medium">{o.name}</div>
+                <div className="text-sm text-gray-600">{o.email || '—'} {o.role && <span>· {o.role}</span>}</div>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={()=>onEdit(o)}>Edit</Button>
+                <Button variant="outline" onClick={()=>onDelete(o.id)}>Delete</Button>
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// Owner Board View (uses ownerId)
+function OwnerBoard({ owners, clients, onDrill }) {
+  const [ownerFilter, setOwnerFilter] = useState('') // ownerId
+  const [typeFilter, setTypeFilter] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
+  const [query, setQuery] = useState('')
+
+  const ownerById = useMemo(() => new Map(owners.map(o => [o.id, o])), [owners])
+
+  // flatten deliverables with client + year context
+  const rows = useMemo(() => {
+    const out = []
+    for (const c of clients) {
+      const dels = c.deliverables || []
+      for (const d of dels) {
+        const taxYear = d.taxYear ?? yearOf(d.date) ?? c.year ?? null
+        const name = d.ownerId ? (ownerById.get(d.ownerId)?.name || 'Unassigned') : 'Unassigned'
+        out.push({
+          clientId: c.id,
+          clientName: c.group,
+          taxYear,
+          deliverableId: d.id,
+          type: d.type,
+          status: d.status,
+          ownerId: d.ownerId || '',
+          ownerName: name,
+          date: d.date || '',
+          notes: d.notes || '',
+        })
+      }
+    }
+    return out
+  }, [clients, ownerById])
+
+  const filtered = useMemo(() => {
+    return rows.filter(r => {
+      if (ownerFilter && (r.ownerId || '') !== ownerFilter) return false
+      if (typeFilter && r.type !== typeFilter) return false
+      if (statusFilter && r.status !== statusFilter) return false
+      if (query && !(`${r.clientName} ${r.type} ${r.notes} ${r.taxYear}`.toLowerCase().includes(query.toLowerCase()))) return false
+      return true
+    })
+  }, [rows, ownerFilter, typeFilter, statusFilter, query])
+
+  // group by owner name (including Unassigned)
+  const grouped = useMemo(() => {
+    const map = new Map()
+    for (const r of filtered) {
+      const key = r.ownerName || 'Unassigned'
+      const bucket = map.get(key) || []
+      bucket.push(r)
+      map.set(key, bucket)
+    }
+    return map
+  }, [filtered])
+
+  return (
+    <div className="p-4 sm:p-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between mb-4">
+        <h2 className="text-2xl font-semibold">Owner Board</h2>
+        <div className="flex gap-2">
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-2 top-2.5 text-gray-400" />
+            <Input className="pl-8" placeholder="Search (client / type / notes / year)" value={query} onChange={e=>setQuery(e.target.value)} />
+          </div>
+          <select className="border rounded-xl px-3 py-2 bg-white" value={ownerFilter} onChange={e=>setOwnerFilter(e.target.value)}>
+            <option value="">All Owners</option>
+            {owners.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+            <option value="__unassigned__" disabled>—</option>
+          </select>
+          <select className="border rounded-xl px-3 py-2 bg-white" value={typeFilter} onChange={e=>setTypeFilter(e.target.value)}>
+            <option value="">All Types</option>
+            {BOARD_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+          <select className="border rounded-xl px-3 py-2 bg-white" value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}>
+            <option value="">All Statuses</option>
+            {BOARD_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {grouped.size === 0 && (
+        <div className="text-sm text-gray-600">No deliverables match your filters.</div>
+      )}
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {[...grouped.entries()].map(([ownerName, items]) => (
+          <Card key={ownerName}>
+            <CardContent className="p-4">
+              <div className="font-semibold mb-2">{ownerName} <span className="text-sm text-gray-500">({items.length})</span></div>
+              <div className="flex flex-col gap-2">
+                {items.map((r) => (
+                  <div
+                    key={`${r.clientId}_${r.deliverableId}`}
+                    className="rounded-xl border p-3 hover:shadow cursor-pointer"
+                    onClick={() => onDrill(r.clientId, r.taxYear)}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="font-medium">{r.type}</div>
+                      <div className="text-xs text-gray-600">{r.status}</div>
+                    </div>
+                    <div className="text-sm text-gray-700">{r.clientName} — {r.taxYear}</div>
+                    {r.date && <div className="text-xs text-gray-500 mt-1">Date: {r.date}</div>}
+                    {r.notes && <div className="text-xs text-gray-500 line-clamp-2">{r.notes}</div>}
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ----------------------------------------------
 // Component
 // ----------------------------------------------
 export default function TaxPlanningDashboard() {
@@ -247,7 +474,15 @@ export default function TaxPlanningDashboard() {
     } catch { return DEFAULT_CLIENTS }
   })
 
-  // ✅ Idle/debounced persistence — avoids blocking the main thread on every tiny update
+  // 🔹 Owners SST state (IDs)
+  const [owners, setOwners] = useState(() => loadOwners())
+  const ownerByName = useMemo(() => new Map(owners.map(o => [o.name.toLowerCase(), o.id])), [owners])
+  const ownerById = useMemo(() => new Map(owners.map(o => [o.id, o])), [owners])
+
+  // top-level view toggle
+  const [view, setView] = useState('dashboard') // 'dashboard' | 'ownerBoard' | 'owners'
+
+  // ✅ Persist dashboard
   useEffect(() => {
     let t
     const write = () => {
@@ -272,18 +507,19 @@ export default function TaxPlanningDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // subscribe to store
+  // subscribe to store — now merging name + years too
   useEffect(() => {
     const syncFromStore = () => {
       const latestStore = storeGetClients()
       setClients(prev => {
-        const dashById = new Map(prev.map(c => [c.id, c]))
-        const dash = [...prev]
+        const byId = new Map(prev.map(c => [c.id, c]))
+        const next = [...prev]
         for (const s of latestStore) {
-          if (!dashById.has(s.id)) {
-            dash.unshift({
+          const curr = byId.get(s.id)
+          if (!curr) {
+            next.unshift({
               id: s.id,
-              group: s.name,
+              group: s.name, // name sync
               client: '',
               entity: s.entityType || 'Individual',
               serviceLevel: 'Clarity',
@@ -306,16 +542,48 @@ export default function TaxPlanningDashboard() {
               ]
             })
           } else {
-            dashById.get(s.id).entity = s.entityType || dashById.get(s.id).entity
+            // 🧩 Merge updates from the client screen
+            curr.group = s.name || curr.group
+            curr.entity = s.entityType || curr.entity
+            // If years changed, prefer the first as primary display year (keeps expandRows correct)
+            if (Array.isArray(s.years) && s.years.length) {
+              curr.year = s.years[0]
+            }
           }
         }
-        return dash
+        return next
       })
     }
     const unsub = storeSubscribe(() => syncFromStore())
     syncFromStore()
     return unsub
   }, [])
+
+  // 🔁 MIGRATION: convert legacy string owners → ownerId (runs once at mount & when owners change)
+  useEffect(() => {
+    setClients(prev => {
+      let changed = false
+      const next = prev.map(c => {
+        let cChanged = false
+        const dels = (c.deliverables || []).map(d => {
+          if (!d.ownerId) {
+            const matchId = (d.owner && ownerByName.get(String(d.owner).toLowerCase())) || null
+            if (matchId) { cChanged = true; changed = true; return { ...d, ownerId: matchId } }
+          }
+          return d
+        })
+        const pays = (c.paymentRequests || []).map(p => {
+          if (!p.ownerId) {
+            const matchId = (p.owner && ownerByName.get(String(p.owner).toLowerCase())) || null
+            if (matchId) { cChanged = true; changed = true; return { ...p, ownerId: matchId } }
+          }
+          return p
+        })
+        return cChanged ? { ...c, deliverables: dels, paymentRequests: pays } : c
+      })
+      return changed ? next : prev
+    })
+  }, [ownerByName])
 
   // UI state
   const [yearFilter, setYearFilter] = useState('All')
@@ -336,7 +604,7 @@ export default function TaxPlanningDashboard() {
     )
   }, [expandedRows, yearFilter, risk, query])
 
-  // 🔄 Keep selection valid and FRESH from canonical clients to avoid stale-object lags
+  // 🔄 Keep selection valid and fresh
   useEffect(() => {
     if (!selectedClient) return
     const hasRow = expandedRows.find(r => r.id === selectedClient.id && r.rowYear === selectedYear)
@@ -351,7 +619,7 @@ export default function TaxPlanningDashboard() {
     return clients.find(c => c.id === selectedClient.id) || selectedClient
   }, [clients, selectedClient])
 
-  // ✍️ Draft inputs (so typing never spams global state)
+  // ✍️ Draft inputs
   const [draftSafeHarbor, setDraftSafeHarbor] = useState('')
   const [draftServiceLevel, setDraftServiceLevel] = useState('Clarity')
 
@@ -380,7 +648,7 @@ export default function TaxPlanningDashboard() {
     })
   }
 
-  // ------- CRUD helpers (wrap heavier list updates in transitions) -------
+  // ------- CRUD helpers -------
   function addClient() {
     const group = prompt('Client/Group name (e.g., CB Direct, LLC):'); if (!group) return
     const client = prompt('Primary contact (e.g., Michael Cain):') || ''
@@ -398,11 +666,11 @@ export default function TaxPlanningDashboard() {
       deliverablesProgress: 0, strategies: [], deliverables: [],
       estimateOwner: '', meetingOwner: '', requestOwner: '',
       paymentRequests: [
-        { quarter: 'Q1', requestDate: null, amount: null, status: 'Pending', owner: null, taxYear },
-        { quarter: 'Q2', requestDate: null, amount: null, status: 'Pending', owner: null, taxYear },
-        { quarter: 'Q3', requestDate: null, amount: null, status: 'Pending', owner: null, taxYear },
-        { quarter: 'Q4', requestDate: null, amount: null, status: 'Pending', owner: null, taxYear },
-        { quarter: 'Extension', requestDate: null, amount: null, status: 'Pending', owner: null, taxYear },
+        { quarter: 'Q1', requestDate: null, amount: null, status: 'Pending', ownerId: null, owner: null, taxYear },
+        { quarter: 'Q2', requestDate: null, amount: null, status: 'Pending', ownerId: null, owner: null, taxYear },
+        { quarter: 'Q3', requestDate: null, amount: null, status: 'Pending', ownerId: null, owner: null, taxYear },
+        { quarter: 'Q4', requestDate: null, amount: null, status: 'Pending', ownerId: null, owner: null, taxYear },
+        { quarter: 'Extension', requestDate: null, amount: null, status: 'Pending', ownerId: null, owner: null, taxYear },
       ]
     }
 
@@ -411,6 +679,7 @@ export default function TaxPlanningDashboard() {
       storeAddClient({ id, name: group, entityType: entity, notes: '', taxYear })
       setSelectedClient(newClient)
       setSelectedYear(taxYear)
+      setView('dashboard')
     })
   }
 
@@ -421,6 +690,7 @@ export default function TaxPlanningDashboard() {
       setSelectedClient(null)
       const keep = storeClients.filter(s => s.id !== clientId)
       storeSetClients(keep)
+      setView('dashboard')
     })
   }
 
@@ -436,7 +706,10 @@ export default function TaxPlanningDashboard() {
     const requestDate = prompt('Request date (YYYY-MM-DD):', today())
     const amount = Number(prompt('Amount (just numbers):', '0') || 0)
     const status = prompt('Status (Pending / Sent / Paid):', 'Pending') || 'Pending'
-    const owner = prompt('Owner (name):', c?.requestOwner || '') || null
+
+    // choose owner by ID using SST
+    const pickOwnerName = prompt('Owner (name, optional – will map to SST):', '') || ''
+    const ownerId = pickOwnerName ? (ownerByName.get(pickOwnerName.toLowerCase()) || null) : null
 
     const taxYear = Number(selectedYear || c.year || new Date().getFullYear())
 
@@ -446,11 +719,11 @@ export default function TaxPlanningDashboard() {
         const ensureExt = arr =>
           arr.some(p => p.quarter === 'Extension')
             ? arr
-            : [...arr, { quarter: 'Extension', requestDate: null, amount: null, status: 'Pending', owner: null, taxYear }]
+            : [...arr, { quarter: 'Extension', requestDate: null, amount: null, status: 'Pending', ownerId: null, owner: null, taxYear }]
         const base = ensureExt(pc.paymentRequests || [])
         const paymentRequests = base.map(p =>
           p.quarter === normalizedQuarter
-            ? { quarter: normalizedQuarter, requestDate, amount, status, owner, taxYear }
+            ? { quarter: normalizedQuarter, requestDate, amount, status, ownerId, owner: pickOwnerName || null, taxYear }
             : p
         )
         return { ...pc, paymentRequests }
@@ -480,10 +753,13 @@ export default function TaxPlanningDashboard() {
     const taxYear = Number(selectedYear || c.year || new Date().getFullYear())
     const type = preset?.type || prompt(`Type (${DELIVERABLE_TYPES.join(' / ')}):`, 'Estimate') || 'Estimate'
     const date = preset?.date || prompt('Date (YYYY-MM-DD):', today()) || today()
-    const owner = preset?.owner || prompt('Owner:', 'Unassigned') || 'Unassigned'
+    // select owner by ID
+    const defaultOwnerName = owners[0]?.name || ''
+    const ownerName = preset?.owner || prompt('Owner (name, optional – will map to SST):', defaultOwnerName) || ''
+    const ownerId = ownerName ? (ownerByName.get(ownerName.toLowerCase()) || null) : null
     const status = preset?.status || prompt(`Status (${DELIVERABLE_STATUSES.join(' / ')}):`, 'Planned') || 'Planned'
     const notes = preset?.notes ?? (prompt('Notes (optional):', '') || '')
-    const item = { id: `${Date.now()}`, type, date, owner, status, notes, taxYear }
+    const item = { id: `${Date.now()}`, type, date, ownerId, status, notes, taxYear }
     startTransition(() => {
       setClients(prev => prev.map(pc => pc.id !== c.id ? pc : { ...pc, deliverables: [item, ...(pc.deliverables || [])] }))
     })
@@ -502,11 +778,22 @@ export default function TaxPlanningDashboard() {
         const deliverables = (pc.deliverables || []).map(d => {
           if (d.id !== deliverableId) return d
           const newTaxYear = patch.date ? (yearOf(patch.date) ?? selectedYear ?? pc.year) : d.taxYear
-          return { ...d, ...patch, taxYear: newTaxYear }
+          // if patch.ownerId missing but patch.owner given (legacy), map to id
+          const ownerIdFromName = (patch.owner && !patch.ownerId) ? (ownerByName.get(String(patch.owner).toLowerCase()) || null) : undefined
+          return { ...d, ...patch, ...(ownerIdFromName !== undefined ? { ownerId: ownerIdFromName } : {}), taxYear: newTaxYear }
         })
         return { ...pc, deliverables }
       }))
     })
+  }
+
+  // Board drill handler → open detail for (clientId, year)
+  function drillToClientYear(clientId, year) {
+    const target = clients.find(c => c.id === clientId)
+    if (!target) return
+    setSelectedClient(target)
+    setSelectedYear(year)
+    setView('dashboard')
   }
 
   // ----------------------------------------------
@@ -521,282 +808,324 @@ export default function TaxPlanningDashboard() {
           {isPending && <span className="text-xs opacity-60">Updating…</span>}
         </div>
 
-        <div className="mt-4 flex gap-3 items-center">
-          <div className="relative w-full md:w-96">
-            <Search className="w-4 h-4 absolute left-3 top-3 text-gray-400" />
-            <Input placeholder="Search client or entity..." className="pl-9" value={query} onChange={(e) => setQuery(e.target.value)} />
+        {/* Top controls / view toggle */}
+        <div className="mt-4 flex flex-wrap gap-3 items-center">
+          <div className="flex gap-2">
+            <Button variant={view==='dashboard'?'default':'outline'} onClick={()=>setView('dashboard')}>Main</Button>
+            <Button variant={view==='ownerBoard'?'default':'outline'} onClick={()=>setView('ownerBoard')}>Owner Board</Button>
+            <Button variant={view==='owners'?'default':'outline'} onClick={()=>setView('owners')}>Owners (SST)</Button>
           </div>
 
-          {/* Tax Year filter */}
-          <select className="border rounded-xl px-3 py-2 bg-white" value={yearFilter} onChange={(e) => setYearFilter(e.target.value)} disabled={!!selectedClientFresh}>
-            <option value="All">All Tax Years</option>
-            {[...new Set(expandedRows.map(r => r.rowYear))].sort((a,b)=>a-b).map(y => (
-              <option key={y} value={y}>{y}</option>
-            ))}
-          </select>
-
-          <select className="border rounded-xl px-3 py-2 bg-white" value={risk} onChange={(e) => setRisk(e.target.value)} disabled={!!selectedClientFresh}>
-            {['All','Low','Medium','High'].map(r => <option key={r} value={r}>{r}</option>)}
-          </select>
-
-          {!selectedClientFresh && <Button onClick={addClient}>+ Add Client</Button>}
-          {selectedClientFresh && (
+          {view === 'dashboard' && !selectedClientFresh && (
             <>
-              <Button className="btn-soft" onClick={() => { setSelectedClient(null); setSelectedYear(null) }}>← Back to Dashboard</Button>
-              <Button className="btn-soft" onClick={() => deleteClient(selectedClientFresh.id)} title="Delete client">🗑 Delete Client</Button>
+              <div className="relative w-full md:w-96">
+                <Search className="w-4 h-4 absolute left-3 top-3 text-gray-400" />
+                <Input placeholder="Search client or entity..." className="pl-9" value={query} onChange={(e) => setQuery(e.target.value)} />
+              </div>
+
+              <select className="border rounded-xl px-3 py-2 bg-white" value={yearFilter} onChange={(e) => setYearFilter(e.target.value)} disabled={!!selectedClientFresh}>
+                <option value="All">All Tax Years</option>
+                {[...new Set(expandedRows.map(r => r.rowYear))].sort((a,b)=>a-b).map(y => (
+                  <option key={y} value={y}>{y}</option>
+                ))}
+              </select>
+
+              <select className="border rounded-xl px-3 py-2 bg-white" value={risk} onChange={(e) => setRisk(e.target.value)} disabled={!!selectedClientFresh}>
+                {['All','Low','Medium','High'].map(r => <option key={r} value={r}>{r}</option>)}
+              </select>
+
+              {!selectedClientFresh && <Button onClick={addClient}>+ Add Client</Button>}
+              {selectedClientFresh && (
+                <>
+                  <Button className="btn-soft" onClick={() => { setSelectedClient(null); setSelectedYear(null) }}>← Back to Dashboard</Button>
+                  <Button className="btn-soft" onClick={() => deleteClient(selectedClientFresh.id)} title="Delete client">🗑 Delete Client</Button>
+                </>
+              )}
             </>
           )}
         </div>
       </div>
 
-      {/* Table */}
-      {!selectedClientFresh && (
-        <div className="px-6 -mt-6">
-          <Card className="rounded-2xl">
-            <CardContent className="p-4 space-y-3">
-              <div className="grid grid-cols-12 text-xs text-gray-500 font-medium border-b pb-2">
-                <div className="col-span-3">Client</div>
-                <div className="col-span-1">Tax Year</div>
-                <div className="col-span-1">Entity</div>
-                <div className="col-span-1">Service Level</div>
-                <div className="col-span-1">Risk</div>
-                <div className="col-span-1">Safe Harbor</div>
-                <div className="col-span-1">Estimates Sent</div>
-                <div className="col-span-1">Meetings Held</div>
-                <div className="col-span-1">Requests Sent</div>
-                <div className="col-span-1">YTD Paid</div>
-              </div>
-
-              {filtered.map((r) => {
-                const { estimatesSent, meetingsHeld, requestsSent } = kpisFromDeliverablesForYear(r, r.rowYear)
-                const alerts = getAlertsForYear(r, r.rowYear)
-                const rowTone = alerts.some(a => a.level === 'error') ? 'bg-red-50' : alerts.some(a => a.level === 'warn') ? 'bg-amber-50' : 'bg-white'
-                const ytdPaid = totalPaidForYear(r, r.rowYear)
-                const safeHarborVal = getSafeHarbor(r, r.rowYear)
-                return (
-                  <div
-                    key={r.rowId}
-                    onClick={() => { setSelectedClient(r); setSelectedYear(r.rowYear); }}
-                    className={`grid grid-cols-12 items-center border-b py-2 text-sm hover:bg-gray-50 cursor-pointer rounded-lg ${rowTone}`}
-                  >
-                    <div className="col-span-3 font-medium">{r.group}</div>
-                    <div className="col-span-1 text-gray-700">{r.rowYear}</div>
-                    <div className="col-span-1 text-gray-600">{r.entity}</div>
-                    <div className="col-span-1 text-gray-600">{r.serviceLevel}</div>
-                    <div className="col-span-1"><Badge className={r.risk === 'High' ? 'pill-err' : r.risk === 'Medium' ? 'pill-warn' : 'pill-okay'}>{r.risk}</Badge></div>
-                    <div className="col-span-1">${(safeHarborVal ?? 0).toLocaleString()}</div>
-                    <div className="col-span-1 text-center">{estimatesSent}</div>
-                    <div className="col-span-1 text-center">{meetingsHeld}</div>
-                    <div className="col-span-1 text-center">{requestsSent}</div>
-                    <div className="col-span-1 text-center font-semibold">${ytdPaid.toLocaleString()}</div>
-                  </div>
-                )
-              })}
-            </CardContent>
-          </Card>
-        </div>
+      {/* ===== Views ===== */}
+      {view === 'owners' && (
+        <OwnersSST
+          owners={owners}
+          setOwners={(next)=>{ setOwners(next); saveOwners(next) }}
+          onGoBoard={()=>setView('ownerBoard')}
+        />
       )}
 
-      {/* Detail drawer */}
-      {selectedClientFresh && (() => {
-        const alerts = getAlertsForYear(selectedClientFresh, selectedYear)
-        const tone = alerts.some(a => a.level === 'error') ? 'err' : alerts.some(a => a.level === 'warn') ? 'warn' : 'ok'
-        const title = tone === 'err' ? 'Issues detected' : tone === 'warn' ? 'Action recommended' : 'All good'
+      {view === 'ownerBoard' && (
+        <OwnerBoard
+          owners={owners}
+          clients={clients}
+          onDrill={drillToClientYear}
+        />
+      )}
 
-        const { estimatesSent, meetingsHeld, requestsSent } = kpisFromDeliverablesForYear(selectedClientFresh, selectedYear)
+      {view === 'dashboard' && (
+        <>
+          {/* Table */}
+          {!selectedClientFresh && (
+            <div className="px-6 -mt-6">
+              <Card className="rounded-2xl">
+                <CardContent className="p-4 space-y-3">
+                  <div className="grid grid-cols-12 text-xs text-gray-500 font-medium border-b pb-2">
+                    <div className="col-span-3">Client</div>
+                    <div className="col-span-1">Tax Year</div>
+                    <div className="col-span-1">Entity</div>
+                    <div className="col-span-1">Service Level</div>
+                    <div className="col-span-1">Risk</div>
+                    <div className="col-span-1">Safe Harbor</div>
+                    <div className="col-span-1">Estimates Sent</div>
+                    <div className="col-span-1">Meetings Held</div>
+                    <div className="col-span-1">Requests Sent</div>
+                    <div className="col-span-1">YTD Paid</div>
+                  </div>
 
-        const paymentsForYear = (selectedClientFresh.paymentRequests || []).filter(p => {
-          const y = p.taxYear ?? yearOf(p.requestDate) ?? selectedClientFresh.year ?? null
-          return Number(y) === Number(selectedYear)
-        })
-
-        const deliverablesForYear = (selectedClientFresh.deliverables || []).filter(d => {
-          const y = d.taxYear ?? yearOf(d.date) ?? selectedClientFresh.year ?? null
-          return Number(y) === Number(selectedYear)
-        })
-
-        const safeHarborForYear = getSafeHarbor(selectedClientFresh, selectedYear)
-
-        return (
-          <div className="px-6 mt-6 space-y-4">
-            <div className="text-sm text-gray-500">
-              Editing for <span className="font-semibold">{selectedClientFresh.group}</span> · <span className="font-semibold">Tax Year {selectedYear}</span>
-            </div>
-
-            <Alert tone={tone} title={title}>
-              {alerts.length === 0 ? 'Client is meeting baseline targets.' : (
-                <ul className="list-disc ml-5">
-                  {alerts.map(a => <li key={a.id}>{a.text}</li>)}
-                </ul>
-              )}
-            </Alert>
-
-            {/* KPI quick actions + Safe Harbor */}
-            <Card>
-              <CardContent className="flex flex-wrap gap-3 items-center">
-                <div className="text-sm text-gray-600">
-                  Safe Harbor Target ($):
-                  <input
-                    type="text"
-                    className="border rounded-xl px-3 py-2 w-40 ml-2"
-                    value={draftSafeHarbor}
-                    onChange={(e) => setDraftSafeHarbor(e.target.value)}
-                    onBlur={commitSafeHarbor}
-                    onKeyDown={(e) => { if (e.key === 'Enter') commitSafeHarbor() }}
-                  />
-                  <span className="ml-2 text-xs opacity-60">
-                    Canonical: {(safeHarborForYear ?? 0).toLocaleString()}
-                  </span>
-                </div>
-
-                <div className="text-sm text-gray-600">Service Level:
-                  <select
-                    className="border rounded-xl px-2 py-1 ml-2 bg-white"
-                    value={draftServiceLevel}
-                    onChange={(e) => commitServiceLevel(e.target.value)}
-                  >
-                    {SERVICE_LEVELS.map(sl => <option key={sl} value={sl}>{sl}</option>)}
-                  </select>
-                </div>
-
-                <div className="text-sm text-gray-600">Estimates Sent: <span className="font-semibold">{estimatesSent}</span></div>
-                <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Estimate', status: 'Sent', owner: selectedClientFresh.estimateOwner || 'Unassigned', date: today(), notes: 'Estimate sent' })}>+ Estimate</Button>
-
-                <div className="text-sm text-gray-600">Meetings Held: <span className="font-semibold">{meetingsHeld}</span></div>
-                <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Meeting', status: 'Completed', owner: selectedClientFresh.meetingOwner || 'Unassigned', date: today(), notes: 'Planning meeting' })}>+ Meeting</Button>
-
-                <div className="text-sm text-gray-600">Requests Sent: <span className="font-semibold">{requestsSent}</span></div>
-                <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Info Request', status: 'Requested', owner: selectedClientFresh.requestOwner || 'Unassigned', date: today(), notes: 'Docs requested' })}>+ Info Request</Button>
-
-                <div className="ml-auto text-sm text-gray-600">
-                  YTD Paid: <span className="font-semibold">${totalPaidForYear(selectedClientFresh, selectedYear).toLocaleString()}</span>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Tabs defaultValue="payments">
-              <TabsList className="mt-2">
-                <TabsTrigger value="payments">Payments</TabsTrigger>
-                <TabsTrigger value="deliverables">Deliverables</TabsTrigger>
-                <TabsTrigger value="strategies">Strategies</TabsTrigger>
-              </TabsList>
-
-              {/* PAYMENTS */}
-              <TabsContent value="payments" className="mt-2 text-sm text-gray-700 space-y-3">
-                <div className="flex gap-2">
-                  <Button className="btn-soft" onClick={() => addOrUpdatePayment(selectedClientFresh)}>+ Add/Update Payment</Button>
-                </div>
-                <div className="grid md:grid-cols-5 gap-3">
-                  {paymentsForYear.map((p, i) => (
-                    <Card key={i} className="rounded-xl p-3 text-sm">
-                      <div className="font-semibold">{p.quarter}</div>
-                      <div className="text-gray-600">Requested: {p.requestDate || '—'}</div>
-                      <div className="text-gray-600">Amount: {p.amount ? `$${p.amount.toLocaleString()}` : '—'}</div>
-                      <div className="flex items-center gap-2">
-                        <span>Status:</span>
-                        <select
-                          className="border rounded-lg px-2 py-1 bg-white"
-                          value={p.status || 'Pending'}
-                          onChange={(e) => updatePaymentStatus(selectedClientFresh.id, p.quarter, e.target.value)}
-                        >
-                          {PAYMENT_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
-                        </select>
+                  {filtered.map((r) => {
+                    const { estimatesSent, meetingsHeld, requestsSent } = kpisFromDeliverablesForYear(r, r.rowYear)
+                    const alerts = getAlertsForYear(r, r.rowYear)
+                    const rowTone = alerts.some(a => a.level === 'error') ? 'bg-red-50' : alerts.some(a => a.level === 'warn') ? 'bg-amber-50' : 'bg-white'
+                    const ytdPaid = totalPaidForYear(r, r.rowYear)
+                    const safeHarborVal = getSafeHarbor(r, r.rowYear)
+                    return (
+                      <div
+                        key={r.rowId}
+                        onClick={() => { setSelectedClient(r); setSelectedYear(r.rowYear); }}
+                        className={`grid grid-cols-12 items-center border-b py-2 text-sm hover:bg-gray-50 cursor-pointer rounded-lg ${rowTone}`}
+                      >
+                        <div className="col-span-3 font-medium">{r.group}</div>
+                        <div className="col-span-1 text-gray-700">{r.rowYear}</div>
+                        <div className="col-span-1 text-gray-600">{r.entity}</div>
+                        <div className="col-span-1 text-gray-600">{r.serviceLevel}</div>
+                        <div className="col-span-1"><Badge className={r.risk === 'High' ? 'pill-err' : r.risk === 'Medium' ? 'pill-warn' : 'pill-okay'}>{r.risk}</Badge></div>
+                        <div className="col-span-1">${(safeHarborVal ?? 0).toLocaleString()}</div>
+                        <div className="col-span-1 text-center">{estimatesSent}</div>
+                        <div className="col-span-1 text-center">{meetingsHeld}</div>
+                        <div className="col-span-1 text-center">{requestsSent}</div>
+                        <div className="col-span-1 text-center font-semibold">${ytdPaid.toLocaleString()}</div>
                       </div>
-                      <div className="text-gray-600">Owner: {p.owner || 'Unassigned'}</div>
-                      <div className="text-gray-400 text-xs">Tax Year: {p.taxYear ?? (yearOf(p.requestDate) ?? selectedClientFresh.year)}</div>
-                    </Card>
-                  ))}
+                    )
+                  })}
+                </CardContent>
+              </Card>
+            </div>
+          )}
+
+          {/* Detail drawer */}
+          {selectedClientFresh && (() => {
+            const alerts = getAlertsForYear(selectedClientFresh, selectedYear)
+            const tone = alerts.some(a => a.level === 'error') ? 'err' : alerts.some(a => a.level === 'warn') ? 'warn' : 'ok'
+            const title = tone === 'err' ? 'Issues detected' : tone === 'warn' ? 'Action recommended' : 'All good'
+
+            const { estimatesSent, meetingsHeld, requestsSent } = kpisFromDeliverablesForYear(selectedClientFresh, selectedYear)
+
+            const paymentsForYear = (selectedClientFresh.paymentRequests || []).filter(p => {
+              const y = p.taxYear ?? yearOf(p.requestDate) ?? selectedClientFresh.year ?? null
+              return Number(y) === Number(selectedYear)
+            })
+
+            const deliverablesForYear = (selectedClientFresh.deliverables || []).filter(d => {
+              const y = d.taxYear ?? yearOf(d.date) ?? selectedClientFresh.year ?? null
+              return Number(y) === Number(selectedYear)
+            })
+
+            const safeHarborForYear = getSafeHarbor(selectedClientFresh, selectedYear)
+
+            return (
+              <div className="px-6 mt-6 space-y-4">
+                <div className="text-sm text-gray-500">
+                  Editing for <span className="font-semibold">{selectedClientFresh.group}</span> · <span className="font-semibold">Tax Year {selectedYear}</span>
                 </div>
-              </TabsContent>
 
-              {/* DELIVERABLES */}
-              <TabsContent value="deliverables" className="mt-2 text-sm text-gray-700 space-y-2">
-                <div className="flex gap-2">
-                  <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh)}>+ Add Deliverable</Button>
-                  <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Estimate', status: 'Sent', owner: selectedClientFresh.estimateOwner || 'Unassigned', date: today(), notes: 'Estimate sent' })}>+ Quick Estimate</Button>
-                  <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Meeting', status: 'Completed', owner: selectedClientFresh.meetingOwner || 'Unassigned', date: today(), notes: 'Meeting held' })}>+ Quick Meeting</Button>
-                  <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Info Request', status: 'Requested', owner: selectedClientFresh.requestOwner || 'Unassigned', date: today(), notes: 'Docs requested' })}>+ Quick Request</Button>
-                </div>
+                <Alert tone={tone} title={title}>
+                  {alerts.length === 0 ? 'Client is meeting baseline targets.' : (
+                    <ul className="list-disc ml-5">
+                      {alerts.map(a => <li key={a.id}>{a.text}</li>)}
+                    </ul>
+                  )}
+                </Alert>
 
-                {(deliverablesForYear.length ?? 0) === 0 && <p className="text-gray-600">No deliverables for {selectedYear} yet.</p>}
+                {/* KPI quick actions + Safe Harbor */}
+                <Card>
+                  <CardContent className="flex flex-wrap gap-3 items-center">
+                    <div className="text-sm text-gray-600">
+                      Safe Harbor Target ($):
+                      <input
+                        type="text"
+                        className="border rounded-xl px-3 py-2 w-40 ml-2"
+                        value={draftSafeHarbor}
+                        onChange={(e) => setDraftSafeHarbor(e.target.value)}
+                        onBlur={commitSafeHarbor}
+                        onKeyDown={(e) => { if (e.key === 'Enter') commitSafeHarbor() }}
+                      />
+                      <span className="ml-2 text-xs opacity-60">
+                        Canonical: {(safeHarborForYear ?? 0).toLocaleString()}
+                      </span>
+                    </div>
 
-                <div className="overflow-auto">
-                  <table className="table-base w-full text-sm border rounded-xl overflow-hidden">
-                    <thead className="bg-gray-50">
-                      <tr>
-                        <th className="text-left p-2 border">Type</th>
-                        <th className="text-left p-2 border">Date</th>
-                        <th className="text-left p-2 border">Owner</th>
-                        <th className="text-left p-2 border">Status</th>
-                        <th className="text-left p-2 border">Notes</th>
-                        <th className="text-left p-2 border">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {deliverablesForYear.map((d) => (
-                        <tr key={d.id} className="align-top">
-                          <td className="p-2 border">
-                            <select className="border rounded-lg px-2 py-1 bg-white" value={d.type} onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { type: e.target.value })}>
-                              {DELIVERABLE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                            </select>
-                          </td>
-                          <td className="p-2 border">
-                            <input
-                              type="date"
-                              className="border rounded-lg px-2 py-1"
-                              value={d.date || ''}
-                              onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { date: e.target.value })}
-                            />
-                            <div className="text-[10px] text-gray-400 mt-0.5">Tax Year: {d.taxYear ?? (yearOf(d.date) ?? selectedClientFresh.year)}</div>
-                          </td>
-                          <td className="p-2 border">
-                            <input type="text" className="border rounded-lg px-2 py-1 w-full" value={d.owner || ''} onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { owner: e.target.value })} placeholder="Owner" />
-                          </td>
-                          <td className="p-2 border">
-                            <select className="border rounded-lg px-2 py-1 bg-white" value={d.status} onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { status: e.target.value })}>
-                              {DELIVERABLE_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
-                            </select>
-                          </td>
-                          <td className="p-2 border">
-                            <input type="text" className="border rounded-lg px-2 py-1 w-full" value={d.notes || ''} onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { notes: e.target.value })} placeholder="Notes" />
-                          </td>
-                          <td className="p-2 border">
-                            <button className="btn-soft px-2 py-1 rounded-lg" title="Delete" onClick={() => deleteDeliverable(selectedClientFresh.id, d.id)}>
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </td>
-                        </tr>
+                    <div className="text-sm text-gray-600">Service Level:
+                      <select
+                        className="border rounded-xl px-2 py-1 ml-2 bg-white"
+                        value={draftServiceLevel}
+                        onChange={(e) => commitServiceLevel(e.target.value)}
+                      >
+                        {SERVICE_LEVELS.map(sl => <option key={sl} value={sl}>{sl}</option>)}
+                      </select>
+                    </div>
+
+                    <div className="text-sm text-gray-600">Estimates Sent: <span className="font-semibold">{estimatesSent}</span></div>
+                    <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Estimate', status: 'Sent', owner: owners[0]?.name || '', date: today(), notes: 'Estimate sent' })}>+ Estimate</Button>
+
+                    <div className="text-sm text-gray-600">Meetings Held: <span className="font-semibold">{meetingsHeld}</span></div>
+                    <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Meeting', status: 'Completed', owner: owners[0]?.name || '', date: today(), notes: 'Planning meeting' })}>+ Meeting</Button>
+
+                    <div className="text-sm text-gray-600">Requests Sent: <span className="font-semibold">{requestsSent}</span></div>
+                    <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Info Request', status: 'Requested', owner: owners[0]?.name || '', date: today(), notes: 'Docs requested' })}>+ Info Request</Button>
+
+                    <div className="ml-auto text-sm text-gray-600">
+                      YTD Paid: <span className="font-semibold">${totalPaidForYear(selectedClientFresh, selectedYear).toLocaleString()}</span>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Tabs defaultValue="payments">
+                  <TabsList className="mt-2">
+                    <TabsTrigger value="payments">Payments</TabsTrigger>
+                    <TabsTrigger value="deliverables">Deliverables</TabsTrigger>
+                    <TabsTrigger value="strategies">Strategies</TabsTrigger>
+                  </TabsList>
+
+                  {/* PAYMENTS */}
+                  <TabsContent value="payments" className="mt-2 text-sm text-gray-700 space-y-3">
+                    <div className="flex gap-2">
+                      <Button className="btn-soft" onClick={() => addOrUpdatePayment(selectedClientFresh)}>+ Add/Update Payment</Button>
+                    </div>
+                    <div className="grid md:grid-cols-5 gap-3">
+                      {paymentsForYear.map((p, i) => {
+                        const name = p.ownerId ? (ownerById.get(p.ownerId)?.name || 'Unassigned') : (p.owner || 'Unassigned')
+                        return (
+                          <Card key={i} className="rounded-xl p-3 text-sm">
+                            <div className="font-semibold">{p.quarter}</div>
+                            <div className="text-gray-600">Requested: {p.requestDate || '—'}</div>
+                            <div className="text-gray-600">Amount: {p.amount ? `$${p.amount.toLocaleString()}` : '—'}</div>
+                            <div className="flex items-center gap-2">
+                              <span>Status:</span>
+                              <select
+                                className="border rounded-lg px-2 py-1 bg-white"
+                                value={p.status || 'Pending'}
+                                onChange={(e) => updatePaymentStatus(selectedClientFresh.id, p.quarter, e.target.value)}
+                              >
+                                {PAYMENT_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                              </select>
+                            </div>
+                            <div className="text-gray-600">Owner: {name}</div>
+                            <div className="text-gray-400 text-xs">Tax Year: {p.taxYear ?? (yearOf(p.requestDate) ?? selectedClientFresh.year)}</div>
+                          </Card>
+                        )
+                      })}
+                    </div>
+                  </TabsContent>
+
+                  {/* DELIVERABLES */}
+                  <TabsContent value="deliverables" className="mt-2 text-sm text-gray-700 space-y-2">
+                    <div className="flex gap-2">
+                      <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh)}>+ Add Deliverable</Button>
+                      <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Estimate', status: 'Sent', owner: owners[0]?.name || '', date: today(), notes: 'Estimate sent' })}>+ Quick Estimate</Button>
+                      <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Meeting', status: 'Completed', owner: owners[0]?.name || '', date: today(), notes: 'Meeting held' })}>+ Quick Meeting</Button>
+                      <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Info Request', status: 'Requested', owner: owners[0]?.name || '', date: today(), notes: 'Docs requested' })}>+ Quick Request</Button>
+                    </div>
+
+                    {(deliverablesForYear.length ?? 0) === 0 && <p className="text-gray-600">No deliverables for {selectedYear} yet.</p>}
+
+                    <div className="overflow-auto">
+                      <table className="table-base w-full text-sm border rounded-xl overflow-hidden">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="text-left p-2 border">Type</th>
+                            <th className="text-left p-2 border">Date</th>
+                            <th className="text-left p-2 border">Owner</th>
+                            <th className="text-left p-2 border">Status</th>
+                            <th className="text-left p-2 border">Notes</th>
+                            <th className="text-left p-2 border">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {deliverablesForYear.map((d) => (
+                            <tr key={d.id} className="align-top">
+                              <td className="p-2 border">
+                                <select className="border rounded-lg px-2 py-1 bg-white" value={d.type} onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { type: e.target.value })}>
+                                  {DELIVERABLE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                                </select>
+                              </td>
+                              <td className="p-2 border">
+                                <input
+                                  type="date"
+                                  className="border rounded-lg px-2 py-1"
+                                  value={d.date || ''}
+                                  onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { date: e.target.value })}
+                                />
+                                <div className="text-[10px] text-gray-400 mt-0.5">Tax Year: {d.taxYear ?? (yearOf(d.date) ?? selectedClientFresh.year)}</div>
+                              </td>
+                              <td className="p-2 border">
+                                {/* Owner dropdown (IDs) */}
+                                <OwnerSelect
+                                  owners={owners}
+                                  value={d.ownerId || ''}
+                                  onChange={(ownerId) => updateDeliverable(selectedClientFresh.id, d.id, { ownerId })}
+                                />
+                                <div className="text-[10px] text-gray-500 mt-0.5">
+                                  {(d.ownerId && ownerById.get(d.ownerId)?.name) || 'Unassigned'}
+                                </div>
+                              </td>
+                              <td className="p-2 border">
+                                <select className="border rounded-lg px-2 py-1 bg-white" value={d.status} onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { status: e.target.value })}>
+                                  {DELIVERABLE_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                                </select>
+                              </td>
+                              <td className="p-2 border">
+                                <input type="text" className="border rounded-lg px-2 py-1 w-full" value={d.notes || ''} onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { notes: e.target.value })} placeholder="Notes" />
+                              </td>
+                              <td className="p-2 border">
+                                <button className="btn-soft px-2 py-1 rounded-lg" title="Delete" onClick={() => deleteDeliverable(selectedClientFresh.id, d.id)}>
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div className="space-y-1 mt-3">
+                      <div className="text-xs text-gray-500">Overall progress</div>
+                      <Progress value={selectedClientFresh.deliverablesProgress} />
+                    </div>
+                  </TabsContent>
+
+                  {/* STRATEGIES */}
+                  <TabsContent value="strategies" className="mt-2 text-sm text-gray-700 space-y-3">
+                    {(selectedClientFresh.strategies?.length ?? 0) === 0 && <p className="text-gray-600">No strategies listed yet.</p>}
+                    <ul className="list-disc ml-5 space-y-1">
+                      {selectedClientFresh.strategies?.map((s, i) => (
+                        <li key={i}><span className="text-gray-500 mr-2">[{s.date}]</span>{s.note}</li>
                       ))}
-                    </tbody>
-                  </table>
-                </div>
-
-                <div className="space-y-1 mt-3">
-                  <div className="text-xs text-gray-500">Overall progress</div>
-                  <Progress value={selectedClientFresh.deliverablesProgress} />
-                </div>
-              </TabsContent>
-
-              {/* STRATEGIES */}
-              <TabsContent value="strategies" className="mt-2 text-sm text-gray-700 space-y-3">
-                {(selectedClientFresh.strategies?.length ?? 0) === 0 && <p className="text-gray-600">No strategies listed yet.</p>}
-                <ul className="list-disc ml-5 space-y-1">
-                  {selectedClientFresh.strategies?.map((s, i) => (
-                    <li key={i}><span className="text-gray-500 mr-2">[{s.date}]</span>{s.note}</li>
-                  ))}
-                </ul>
-                <Button className="btn-soft" onClick={() => {
-                  const note = prompt('Strategy note:'); if (!note) return
-                  const item = { note, date: today() }
-                  startTransition(() => {
-                    setClients(prev => prev.map(pc => pc.id !== selectedClientFresh.id ? pc : { ...pc, strategies: [item, ...(pc.strategies || [])] }))
-                  })
-                }}>Add Strategy</Button>
-              </TabsContent>
-            </Tabs>
-          </div>
-        )
-      })()}
+                    </ul>
+                    <Button className="btn-soft" onClick={() => {
+                      const note = prompt('Strategy note:'); if (!note) return
+                      const item = { note, date: today() }
+                      startTransition(() => {
+                        setClients(prev => prev.map(pc => pc.id !== selectedClientFresh.id ? pc : { ...pc, strategies: [item, ...(pc.strategies || [])] }))
+                      })
+                    }}>Add Strategy</Button>
+                  </TabsContent>
+                </Tabs>
+              </div>
+            )
+          })()}
+        </>
+      )}
     </div>
   )
 }
