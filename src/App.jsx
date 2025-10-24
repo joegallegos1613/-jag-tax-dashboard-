@@ -1,4 +1,4 @@
-// src/App.jsx — Supabase-driven, keeps full functionality from prior branch, no local/demo data
+// src/App.jsx — Supabase-driven with Owners Board + Owners Admin + ownerId single source of truth
 import React, { useEffect, useMemo, useState, useTransition } from 'react'
 import './index.css'
 import { Card, CardContent } from '@/components/ui/card'
@@ -9,6 +9,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Progress } from '@/components/ui/progress'
 import { Alert } from '@/components/ui/alert'
 import { Search, Trash2 } from 'lucide-react'
+import OwnersBoard from '@/components/OwnersBoard'
+import OwnersAdmin from '@/components/OwnersAdmin'
 
 import {
   loadClientsFromServer,
@@ -114,18 +116,10 @@ function riskForClientYear(c, taxYear) {
   }
   return level
 }
-function expandRows(clients, storeClientsYearsFallback) {
-  const yearsById = new Map()
-  const nameToYears = new Map()
-  for (const s of (storeClientsYearsFallback || [])) {
-    yearsById.set(s.id, s.years || [])
-    nameToYears.set((s.name || '').toLowerCase(), s.years || [])
-  }
+function expandRows(clients) {
   const rows = []
   for (const c of clients) {
-    const fromId = yearsById.get(c.id)
-    const fromName = nameToYears.get((c.group || '').toLowerCase())
-    let years = c.years || fromId || fromName || (c.year ? [Number(c.year)] : [])
+    let years = c.years || (c.year ? [Number(c.year)] : [])
     if (!years || years.length === 0) years = [new Date().getFullYear()]
     for (const y of years) rows.push({ ...c, rowYear: Number(y), rowId: `${c.id}__${y}` })
   }
@@ -137,7 +131,7 @@ export default function App(){
   const [clients, setClients] = useState([])
   const [owners, setOwners] = useState([])
 
-  const [view, setView] = useState('dashboard')
+  const [view, setView] = useState('dashboard') // 'dashboard' | 'ownersBoard' | 'ownersAdmin'
   const [yearFilter, setYearFilter] = useState('All')
   const [risk, setRisk] = useState('All')
   const [query, setQuery] = useState('')
@@ -145,7 +139,6 @@ export default function App(){
   const [selectedYear, setSelectedYear] = useState(null)
   const [isPending, startTransition] = useTransition()
 
-  // Initial load from Supabase stores
   useEffect(() => {
     let unsubC = () => {}
     let unsubO = () => {}
@@ -160,7 +153,7 @@ export default function App(){
     return () => { unsubC(); unsubO() }
   }, [])
 
-  const expandedRows = useMemo(() => expandRows(clients, []), [clients])
+  const expandedRows = useMemo(() => expandRows(clients), [clients])
 
   const filtered = useMemo(() => {
     return expandedRows.filter(r =>
@@ -184,14 +177,12 @@ export default function App(){
     return clients.find(c => c.id === selectedClient.id) || selectedClient
   }, [clients, selectedClient])
 
-  // --- Persist helpers: update both local state and Supabase ---
   function patchClient(clientId, producer){
     setClients(prev => {
       const next = prev.map(c => {
         if (c.id !== clientId) return c
         const updated = producer(c)
-        // Push to Supabase
-        updateClientRow(clientId, updated)
+        updateClientRow(clientId, updated) // push to Supabase
         return updated
       })
       return next
@@ -211,7 +202,7 @@ export default function App(){
       safeHarbor: 0, safeHarborByYear: { [y]: 0 },
       deliverablesProgress: 0,
       strategies: [], deliverables: [],
-      estimateOwner: '', meetingOwner: '', requestOwner: '',
+      estimateOwnerId: null, meetingOwnerId: null, requestOwnerId: null,
       paymentRequests: [
         { quarter: 'Q1', requestDate: null, amount: null, status: 'Pending', ownerId: null, taxYear: y },
         { quarter: 'Q2', requestDate: null, amount: null, status: 'Pending', ownerId: null, taxYear: y },
@@ -252,15 +243,15 @@ export default function App(){
     const requestDate = prompt('Request date (YYYY-MM-DD):', today()) || today()
     const amount = Number(prompt('Amount:', '0') || 0)
     const status = prompt('Status (Pending / Sent / Paid):','Pending') || 'Pending'
-    const owner = prompt('Owner (name, optional):','') || null
+    const ownerId = owners[0]?.id ?? null
     const taxYear = Number(selectedYear || c.year || new Date().getFullYear())
 
     patchClient(c.id, (curr) => {
       const base = (curr.paymentRequests || [])
-      const ensureExt = arr => arr.some(p => p.quarter === 'Extension') ? arr : [...arr, { quarter:'Extension', requestDate:null, amount:null, status:'Pending', owner:null, taxYear }]
-      const list = ensureExt(base).map(p => p.quarter === quarter ? { quarter, requestDate, amount, status, owner, taxYear } : p)
+      const ensureExt = arr => arr.some(p => p.quarter === 'Extension') ? arr : [...arr, { quarter:'Extension', requestDate:null, amount:null, status:'Pending', ownerId:null, taxYear }]
+      const list = ensureExt(base).map(p => p.quarter === quarter ? { quarter, requestDate, amount, status, ownerId, taxYear } : p)
       if (!list.some(p => p.quarter === quarter)){
-        list.push({ quarter, requestDate, amount, status, owner, taxYear })
+        list.push({ quarter, requestDate, amount, status, ownerId, taxYear })
       }
       return { ...curr, paymentRequests: list }
     })
@@ -277,10 +268,10 @@ export default function App(){
     const taxYear = Number(selectedYear || c.year || new Date().getFullYear())
     const type = preset?.type || prompt(`Type (${DELIVERABLE_TYPES.join(' / ')}):`, 'Estimate') || 'Estimate'
     const date = preset?.date || prompt('Date (YYYY-MM-DD):', today()) || today()
-    const owner = preset?.owner || prompt('Owner (name, optional):', '') || ''
+    const ownerId = preset?.ownerId ?? owners[0]?.id ?? null
     const status = preset?.status || prompt(`Status (${DELIVERABLE_STATUSES.join(' / ')}):`, 'Planned') || 'Planned'
     const notes = preset?.notes ?? (prompt('Notes (optional):', '') || '')
-    const item = { id: String(Date.now()), type, date, owner, status, notes, taxYear }
+    const item = { id: String(Date.now()), type, date, ownerId, status, notes, taxYear }
     patchClient(c.id, (curr) => ({ ...curr, deliverables: [item, ...(curr.deliverables || [])] }))
   }
 
@@ -300,11 +291,7 @@ export default function App(){
   }
 
   const ownerById = useMemo(() => new Map(owners.map(o => [o.id, o])), [owners])
-
-  const selectedClientKPIs = useMemo(() => {
-    if (!selectedClientFresh) return { estimatesSent:0, meetingsHeld:0, requestsSent:0 }
-    return kpisFromDeliverablesForYear(selectedClientFresh, selectedYear)
-  }, [selectedClientFresh, selectedYear])
+  const getOwnerName = (ownerId) => ownerId ? (ownerById.get(ownerId)?.name || 'Unknown') : 'Unassigned'
 
   return (
     <div className="p-0 font-sans max-w-7xl mx-auto">
@@ -317,6 +304,8 @@ export default function App(){
         <div className="mt-4 flex flex-wrap gap-3 items-center">
           <div className="flex gap-2">
             <Button variant={view==='dashboard'?'default':'outline'} onClick={()=>setView('dashboard')}>Main</Button>
+            <Button variant={view==='ownersBoard'?'default':'outline'} onClick={()=>setView('ownersBoard')}>Owners Board</Button>
+            <Button variant={view==='ownersAdmin'?'default':'outline'} onClick={()=>setView('ownersAdmin')}>Owners Admin</Button>
           </div>
 
           {view === 'dashboard' && !selectedClientFresh && (
@@ -348,6 +337,14 @@ export default function App(){
           )}
         </div>
       </div>
+
+      {view === 'ownersBoard' && (
+        <OwnersBoard owners={owners} clients={clients} onDrill={drillToClientYear} />
+      )}
+
+      {view === 'ownersAdmin' && (
+        <OwnersAdmin />
+      )}
 
       {view === 'dashboard' && (
         <>
@@ -469,13 +466,52 @@ export default function App(){
                     </div>
 
                     <div className="text-sm text-gray-600">Estimates Sent: <span className="font-semibold">{estimatesSent}</span></div>
-                    <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Estimate', status: 'Sent', owner: owners[0]?.name || '', date: today(), notes: 'Estimate sent' })}>+ Estimate</Button>
+                    <Button
+                      className="btn-soft"
+                      onClick={() =>
+                        addDeliverable(selectedClientFresh, {
+                          type: 'Estimate',
+                          status: 'Sent',
+                          ownerId: owners[0]?.id ?? null,
+                          date: today(),
+                          notes: 'Estimate sent'
+                        })
+                      }
+                    >
+                      + Estimate
+                    </Button>
 
                     <div className="text-sm text-gray-600">Meetings Held: <span className="font-semibold">{meetingsHeld}</span></div>
-                    <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Meeting', status: 'Completed', owner: owners[0]?.name || '', date: today(), notes: 'Planning meeting' })}>+ Meeting</Button>
+                    <Button
+                      className="btn-soft"
+                      onClick={() =>
+                        addDeliverable(selectedClientFresh, {
+                          type: 'Meeting',
+                          status: 'Completed',
+                          ownerId: owners[0]?.id ?? null,
+                          date: today(),
+                          notes: 'Planning meeting'
+                        })
+                      }
+                    >
+                      + Meeting
+                    </Button>
 
                     <div className="text-sm text-gray-600">Requests Sent: <span className="font-semibold">{requestsSent}</span></div>
-                    <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Info Request', status: 'Requested', owner: owners[0]?.name || '', date: today(), notes: 'Docs requested' })}>+ Info Request</Button>
+                    <Button
+                      className="btn-soft"
+                      onClick={() =>
+                        addDeliverable(selectedClientFresh, {
+                          type: 'Info Request',
+                          status: 'Requested',
+                          ownerId: owners[0]?.id ?? null,
+                          date: today(),
+                          notes: 'Docs requested'
+                        })
+                      }
+                    >
+                      + Info Request
+                    </Button>
 
                     <div className="ml-auto text-sm text-gray-600">
                       YTD Paid: <span className="font-semibold">${totalPaidForYear(selectedClientFresh, selectedYear).toLocaleString()}</span>
@@ -496,7 +532,7 @@ export default function App(){
                     </div>
                     <div className="grid md:grid-cols-5 gap-3">
                       {paymentsForYear.map((p, i) => {
-                        const name = p.owner || 'Unassigned'
+                        const name = getOwnerName(p.ownerId)
                         return (
                           <Card key={i} className="rounded-xl p-3 text-sm">
                             <div className="font-semibold">{p.quarter}</div>
@@ -523,9 +559,9 @@ export default function App(){
                   <TabsContent value="deliverables" className="mt-2 text-sm text-gray-700 space-y-2">
                     <div className="flex gap-2">
                       <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh)}>+ Add Deliverable</Button>
-                      <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Estimate', status: 'Sent', owner: owners[0]?.name || '', date: today(), notes: 'Estimate sent' })}>+ Quick Estimate</Button>
-                      <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Meeting', status: 'Completed', owner: owners[0]?.name || '', date: today(), notes: 'Meeting held' })}>+ Quick Meeting</Button>
-                      <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Info Request', status: 'Requested', owner: owners[0]?.name || '', date: today(), notes: 'Docs requested' })}>+ Quick Request</Button>
+                      <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Estimate', status: 'Sent', ownerId: owners[0]?.id ?? null, date: today(), notes: 'Estimate sent' })}>+ Quick Estimate</Button>
+                      <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Meeting', status: 'Completed', ownerId: owners[0]?.id ?? null, date: today(), notes: 'Meeting held' })}>+ Quick Meeting</Button>
+                      <Button className="btn-soft" onClick={() => addDeliverable(selectedClientFresh, { type: 'Info Request', status: 'Requested', ownerId: owners[0]?.id ?? null, date: today(), notes: 'Docs requested' })}>+ Quick Request</Button>
                     </div>
 
                     {(deliverablesForYear.length ?? 0) === 0 && <p className="text-gray-600">No deliverables for {selectedYear} yet.</p>}
@@ -560,7 +596,15 @@ export default function App(){
                                 <div className="text-[10px] text-gray-400 mt-0.5">Tax Year: {d.taxYear ?? (yearOf(d.date) ?? selectedClientFresh.year)}</div>
                               </td>
                               <td className="p-2 border">
-                                <input type="text" className="border rounded-lg px-2 py-1 w-full" value={d.owner || ''} onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { owner: e.target.value })} placeholder="Owner name" />
+                                <select
+                                  className="border rounded-lg px-2 py-1 bg-white w-full"
+                                  value={d.ownerId ?? ''}
+                                  onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { ownerId: e.target.value || null })}
+                                >
+                                  <option value="">Unassigned</option>
+                                  {owners.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+                                </select>
+                                <div className="text-[10px] text-gray-400 mt-0.5">{getOwnerName(d.ownerId)}</div>
                               </td>
                               <td className="p-2 border">
                                 <select className="border rounded-lg px-2 py-1 bg-white" value={d.status} onChange={(e) => updateDeliverable(selectedClientFresh.id, d.id, { status: e.target.value })}>
