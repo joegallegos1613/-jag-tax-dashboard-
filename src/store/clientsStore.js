@@ -1,88 +1,125 @@
-// src/store/clientsStore.js
-const STORAGE_KEY = "jag_clients";
+// Minimal shared store for the JAG dashboard.
+// Keeps the existing synchronous API (getClients/setClients/addClient/subscribe)
+// but persists to Supabase app_state under key "clients" and listens to realtime
+// updates so all users stay in sync.
 
-function uid() {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+import { supabase } from '@/lib/supabaseClient'
+
+const LOCAL_KEY = 'jag_clients_dashboard'
+const STATE_KEY = 'clients' // row key in app_state
+
+let cache = []
+let subscribers = new Set()
+let initialized = false
+
+// ---------- helpers ----------
+function notify() {
+  for (const cb of Array.from(subscribers)) {
+    try { cb(cache) } catch {}
+  }
 }
-
-function sanitize(list) {
-  if (!Array.isArray(list)) return [];
-  return list
-    .filter((c) => c && typeof c === "object")
-    .map((c) => {
-      const name = typeof c.name === "string" ? c.name.trim() : "";
-      const entityType = c.entityType || "S-Corp";
-      const notes = typeof c.notes === "string" ? c.notes : "";
-      const years = Array.isArray(c.years) && c.years.length
-        ? Array.from(new Set(c.years.map((y) => Number(y)).filter((n) => Number.isFinite(n))))
-        : [new Date().getFullYear()];
-      return { id: c.id || uid(), name, entityType, notes, years };
-    })
-    .filter((c) => c.name.length > 0);
+function setLocal(next) {
+  try { localStorage.setItem(LOCAL_KEY, JSON.stringify(next)) } catch {}
 }
-
-export function getClients() {
+function getLocal() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return sanitize(JSON.parse(raw || "[]"));
-  } catch {
-    return [];
+    const raw = localStorage.getItem(LOCAL_KEY)
+    return raw ? JSON.parse(raw) : []
+  } catch { return [] }
+}
+function shallowEqual(a, b) {
+  try { return JSON.stringify(a) === JSON.stringify(b) } catch { return false }
+}
+
+// ---------- Supabase I/O ----------
+async function pullFromSupabase() {
+  const { data, error } = await supabase
+    .from('app_state')
+    .select('data')
+    .eq('key', STATE_KEY)
+    .single()
+
+  // Not found is ok (code PGRST116) — means first run.
+  if (error && error.code !== 'PGRST116') {
+    console.warn('[clientsStore] fetch error', error)
+    return
+  }
+  if (data?.data) {
+    const next = Array.isArray(data.data) ? data.data : []
+    if (!shallowEqual(next, cache)) {
+      cache = next
+      setLocal(cache)
+      notify()
+    }
   }
 }
 
+async function pushToSupabase(next) {
+  const { error } = await supabase
+    .from('app_state')
+    .upsert({ key: STATE_KEY, data: next })
+  if (error) console.warn('[clientsStore] upsert error', error)
+}
+
+// ---------- realtime ----------
+let unsubscribeRealtime = null
+function startRealtime() {
+  if (unsubscribeRealtime) return
+  const channel = supabase
+    .channel('app_state:clients')
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'app_state' },
+      (payload) => {
+        if (payload.new?.key === STATE_KEY) {
+          const next = Array.isArray(payload.new.data) ? payload.new.data : []
+          if (!shallowEqual(next, cache)) {
+            cache = next
+            setLocal(cache)
+            notify()
+          }
+        }
+      },
+    )
+    .subscribe()
+
+  unsubscribeRealtime = () => supabase.removeChannel(channel)
+}
+
+// ---------- public API ----------
+export function getClients() {
+  // synchronous for initial render
+  if (!initialized) {
+    // seed from local first for instant paint
+    cache = getLocal()
+    // then async hydrate from server
+    initialized = true
+    pullFromSupabase().catch(() => {})
+    startRealtime()
+  }
+  return cache
+}
+
 export function setClients(next) {
-  const cleaned = sanitize(next);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(cleaned));
-  window.dispatchEvent(new CustomEvent("clients:updated"));
+  cache = Array.isArray(next) ? next : []
+  setLocal(cache)
+  notify()
+  // fire-and-forget persistence
+  pushToSupabase(cache)
 }
 
-export function addClient({ name, entityType = "S-Corp", notes = "", taxYear = new Date().getFullYear() }) {
-  const list = getClients();
-  const entry = {
-    id: uid(),
-    name: String(name || "").trim(),
-    entityType,
-    notes,
-    years: [Number(taxYear)],
-  };
-  if (!entry.name) return;
-  list.unshift(entry);
-  setClients(list);
+export function addClient(client) {
+  if (!client || !client.id) return
+  cache = [client, ...cache]
+  setLocal(cache)
+  notify()
+  pushToSupabase(cache)
 }
 
-export function updateClient(id, patch) {
-  const list = getClients().map((c) => (c.id === id ? { ...c, ...patch } : c));
-  setClients(list);
-}
-
-export function removeClient(id) {
-  setClients(getClients().filter((c) => c.id !== id));
-}
-
-export function addPlanningYear(id, year) {
-  const y = Number(year);
-  if (!Number.isFinite(y)) return;
-  const updated = getClients().map((c) =>
-    c.id === id ? { ...c, years: Array.from(new Set([...(c.years || []), y])).sort() } : c
-  );
-  setClients(updated);
-}
-
-export function removePlanningYear(id, year) {
-  const y = Number(year);
-  const updated = getClients().map((c) =>
-    c.id === id ? { ...c, years: (c.years || []).filter((v) => Number(v) !== y) } : c
-  );
-  setClients(updated);
-}
-
-// Subscribe to updates (returns unsubscribe)
-export function subscribe(callback) {
-  // push current immediately
-  try { callback(getClients()); } catch {}
-  const handler = () => {
-    try { callback(getClients()); } catch {}
-  };
-  window.addEventListener("clients:updated", handler);
-  return () => window.removeEventListener("clients:updated", handler);
+export function subscribe(cb) {
+  if (typeof cb !== 'function') return () => {}
+  subscribers.add(cb)
+  // call immediately with current cache
+  try { cb(cache) } catch {}
+  return () => { subscribers.delete(cb) }
 }
