@@ -123,22 +123,42 @@ export function subscribe(cb) {
   try { cb(cache) } catch {}
   return () => { subscribers.delete(cb) }
 }
-// --- helpers you likely already have ---
-const LS_KEY = 'clientsStore';
-const load = () => JSON.parse(localStorage.getItem(LS_KEY) || '{"clients":[]}');
-const save = (state) => localStorage.setItem(LS_KEY, JSON.stringify(state));
-
-// --- ensure you have a shared state object ---
-let state = load();
-
-/**
- * Update a client by id with partial fields (name, entityType, notes, etc.)
- * Usage: updateClient(clientId, { name: "New Name", notes: "..." })
- */
+// --- unified cache-based mutators (Supabase + local + notify) ---
 export function updateClient(clientId, updates) {
-  state.clients = (state.clients || []).map(c =>
-    c.id === clientId ? { ...c, ...updates } : c
-  );
-  save(state);
-  return state.clients.find(c => c.id === clientId);
+  if (!clientId || !updates) return;
+  cache = (cache || []).map(c => (c.id === clientId ? { ...c, ...updates } : c));
+  setLocal(cache);
+  notify();
+  pushToSupabase(cache);
+  return cache.find(c => c.id === clientId);
 }
+
+export function removeClient(clientId) {
+  if (!clientId) return;
+  cache = (cache || []).filter(c => c.id !== clientId);
+  setLocal(cache);
+  notify();
+  pushToSupabase(cache);
+}
+
+export function addPlanningYear(clientId, planningYear) {
+  if (!clientId || !planningYear) return;
+  cache = (cache || []).map(c => {
+    if (c.id !== clientId) return c;
+    const years = Array.isArray(c.planningYears) ? c.planningYears : [];
+    // upsert by taxYear if provided; otherwise append
+    const idx = planningYear.taxYear != null
+      ? years.findIndex(y => y.taxYear === planningYear.taxYear)
+      : -1;
+    const nextYears =
+      idx >= 0
+        ? Object.assign([...years], { [idx]: { ...years[idx], ...planningYear } })
+        : [planningYear, ...years];
+    return { ...c, planningYears: nextYears };
+  });
+  setLocal(cache);
+  notify();
+  pushToSupabase(cache);
+  return cache.find(c => c.id === clientId);
+}
+
