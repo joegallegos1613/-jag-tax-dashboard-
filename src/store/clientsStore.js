@@ -194,3 +194,5 @@ export async function removeClientRow(id) {
   const next = cache.filter(c => c.id !== id);
   return setClients(next);
 }
+// --- Compatibility exports for legacy imports ---
+export { addClientRow as addClient, updateClientRow as updateClient, removeClientRow as removeClient }
