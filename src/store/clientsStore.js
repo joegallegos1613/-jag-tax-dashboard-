@@ -123,3 +123,22 @@ export function subscribe(cb) {
   try { cb(cache) } catch {}
   return () => { subscribers.delete(cb) }
 }
+// --- helpers you likely already have ---
+const LS_KEY = 'clientsStore';
+const load = () => JSON.parse(localStorage.getItem(LS_KEY) || '{"clients":[]}');
+const save = (state) => localStorage.setItem(LS_KEY, JSON.stringify(state));
+
+// --- ensure you have a shared state object ---
+let state = load();
+
+/**
+ * Update a client by id with partial fields (name, entityType, notes, etc.)
+ * Usage: updateClient(clientId, { name: "New Name", notes: "..." })
+ */
+export function updateClient(clientId, updates) {
+  state.clients = (state.clients || []).map(c =>
+    c.id === clientId ? { ...c, ...updates } : c
+  );
+  save(state);
+  return state.clients.find(c => c.id === clientId);
+}
