@@ -1,12 +1,10 @@
-import React, { useEffect, useMemo, useState } from "react";
 import {
   getClients,
-  addClient,
-  updateClient,
-  removeClient,
-  addPlanningYear,
-  subscribe,
-} from "../store/clientsStore";
+  addClientRow as addClient,
+  updateClientRow as updateClient,
+  removeClientRow as removeClient,
+} from '@/store/clientsStore'
+
 
 // Added "Individual" to the list
 const ENTITY_TYPES = [

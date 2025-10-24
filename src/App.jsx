@@ -1,3 +1,4 @@
+// src/App.jsx
 import React, { useEffect, useMemo, useState, useTransition } from 'react'
 import './index.css'
 import { Card, CardContent } from '@/components/ui/card'
@@ -10,8 +11,26 @@ import { Alert } from '@/components/ui/alert'
 import { Search, Trash2 } from 'lucide-react'
 import { supabase } from './lib/supabaseClient'
 
+// Store bindings (server-backed)
+import {
+  bindRealtime as bindClientsRealtime,
+  loadClientsFromServer,
+  subscribe as subscribeClients,
+  getClients,
+  // UI helpers that persist to DB:
+  addClientRow, updateClientRow, removeClientRow
+} from '@/store/clientsStore';
 
-// 🔗 Shared client store (used by /clients page too)
+import {
+  bindOwnersRealtime,
+  loadOwnersFromServer,
+  subscribeOwners,
+  getOwners,
+  // (optional) persist helpers for owners if you hook them up later:
+  addOwnerRow, updateOwnerRow, removeOwnerRow
+} from '@/store/ownersStore';
+
+// Legacy local store bridge still used in parts of UI
 import {
   getClients as storeGetClients,
   setClients as storeSetClients,
@@ -31,7 +50,7 @@ const BOARD_TYPES = [...DELIVERABLE_TYPES]
 const BOARD_STATUSES = [...DELIVERABLE_STATUSES]
 
 // ----------------------------------------------
-// Seed data (unchanged structure; per‑year fields are resolved by helpers)
+// Seed data (kept for shape & offline UX, but server is canonical)
 // ----------------------------------------------
 const DEFAULT_CLIENTS = [
   {
@@ -156,11 +175,11 @@ function today() {
 }
 function yearOf(dateStr) {
   if (!dateStr || typeof dateStr !== 'string') return null
-  const m = /^(\\d{4})-/.exec(dateStr.trim())
+  const m = /^(\d{4})-/.exec(dateStr.trim())
   return m ? Number(m[1]) : null
 }
 
-// Year‑scoped KPIs from deliverables
+// Year-scoped KPIs from deliverables
 function kpisFromDeliverablesForYear(c, taxYear) {
   const list = (c.deliverables || []).filter(d => {
     const y = d.taxYear ?? yearOf(d.date) ?? c.year ?? null
@@ -194,7 +213,7 @@ function totalPaidForYear(clientLike, taxYear) {
   }, 0)
 }
 
-// --------- Safe Harbor per‑year helpers ---------
+// --------- Safe Harbor per-year helpers ---------
 function getSafeHarbor(clientLike, taxYear) {
   const map = clientLike.safeHarborByYear || {}
   const val = map[taxYear]
@@ -212,7 +231,7 @@ function setSafeHarborForYear(stateSetter, clientId, taxYear, newValue) {
   }))
 }
 
-// --------- Service Level per‑year helpers (NEW) ---------
+// --------- Service Level per-year helpers ---------
 function getServiceLevel(clientLike, taxYear) {
   const map = clientLike.serviceLevelByYear || {}
   return map[taxYear] || clientLike.serviceLevel || 'Clarity'
@@ -228,12 +247,7 @@ function setServiceLevelForYear(stateSetter, clientId, taxYear, level) {
   }))
 }
 
-// --------- Derived Risk (per‑year) ---------
-// Heuristic:
-//  - Start Low
-//  - If meetings below minimum for that year → at least Medium
-//  - If *also* no estimates sent → High
-//  - If YTD paid < 50% of Safe Harbor AND at least two quarters exist (Q1/Q2/Q3/Q4) with status Sent/Requested → bump one level
+// --------- Derived Risk (per-year) ---------
 function riskForClientYear(c, taxYear) {
   const alerts = getAlertsForYear(c, taxYear)
   const safeHarbor = getSafeHarbor(c, taxYear) || 0
@@ -286,7 +300,7 @@ function expandRows(dashboardClients, storeClients) {
 }
 
 // ----------------------------------------------
-// Owners Single Source of Truth (SST) using IDs
+// Owners SST (IDs) in local cache; can be server-backed via ownersStore
 // ----------------------------------------------
 const DEFAULT_OWNERS = [
   { id: crypto.randomUUID(), name: 'Joe', email: 'joe@jagcpa.com', role: 'Partner' },
@@ -320,7 +334,6 @@ function OwnerSelect({ owners, value, onChange, placeholder = 'Select owner' }) 
     </select>
   )
 }
-
 
 // Owners Management Page (SST)
 function OwnersSST({ owners, setOwners, onGoBoard }) {
@@ -512,96 +525,42 @@ function OwnerBoard({ owners, clients, onDrill }) {
 // Component
 // ----------------------------------------------
 export default function TaxPlanningDashboard() {
-  // load dashboard cache
-  const [clients, setClients] = useState(() => {
-    try {
-      const saved = localStorage.getItem('jag_clients_dashboard')
-      return saved ? JSON.parse(saved) : DEFAULT_CLIENTS
-    } catch { return DEFAULT_CLIENTS }
-  })
+  // Server-backed state via stores (canonical)
+  const [clients, setClients] = useState([])
+  const [owners, setOwners]   = useState([])
 
-  // 🔹 Owners SST state (IDs)
-  const [owners, setOwners] = useState(() => loadOwners())
   const ownerByName = useMemo(() => new Map(owners.map(o => [o.name.toLowerCase(), o.id])), [owners])
   const ownerById = useMemo(() => new Map(owners.map(o => [o.id, o])), [owners])
 
   // top-level view toggle
   const [view, setView] = useState('dashboard') // 'dashboard' | 'ownerBoard' | 'owners'
 
-  // ✅ Persist dashboard
+  // === Bootstrap from Supabase & bind realtime (clients + owners) ===
   useEffect(() => {
-    let t
-    const write = () => {
-      try { localStorage.setItem('jag_clients_dashboard', JSON.stringify(clients)) } catch {}
-    }
-    if ('requestIdleCallback' in window) {
-      const id = window.requestIdleCallback(write)
-      return () => window.cancelIdleCallback(id)
-    } else {
-      t = setTimeout(write, 250)
-      return () => clearTimeout(t)
-    }
-  }, [clients])
+    // Initial fetches from DB
+    loadClientsFromServer();
+    loadOwnersFromServer();
 
-  // hydrate store if empty once
-  useEffect(() => {
-    const storeClients = storeGetClients()
-    if (!storeClients || storeClients.length === 0) {
-      const seed = clients.map(toStoreFromDashboard)
-      storeSetClients(seed)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    // Realtime (INSERT/UPDATE/DELETE → store updates for all tabs)
+    bindClientsRealtime();
+    bindOwnersRealtime();
 
-  // subscribe to store — now merging name + years too
-  useEffect(() => {
-    const syncFromStore = () => {
-      const latestStore = storeGetClients()
-      setClients(prev => {
-        const byId = new Map(prev.map(c => [c.id, c]))
-        const next = [...prev]
-        for (const s of latestStore) {
-          const curr = byId.get(s.id)
-          if (!curr) {
-            next.unshift({
-              id: s.id,
-              group: s.name, // name sync
-              client: '',
-              entity: s.entityType || 'Individual',
-              serviceLevel: 'Clarity',
-              risk: 'Low',
-              status: 'Active',
-              year: (s.years && s.years[0]) || new Date().getFullYear(),
-              safeHarbor: 0,
-              deliverablesProgress: 0,
-              strategies: [],
-              deliverables: [],
-              estimateOwner: '',
-              meetingOwner: '',
-              requestOwner: '',
-              paymentRequests: [
-                { quarter: 'Q1', requestDate: null, amount: null, status: 'Pending', owner: null },
-                { quarter: 'Q2', requestDate: null, amount: null, status: 'Pending', owner: null },
-                { quarter: 'Q3', requestDate: null, amount: null, status: 'Pending', owner: null },
-                { quarter: 'Q4', requestDate: null, amount: null, status: 'Pending', owner: null },
-                { quarter: 'Extension', requestDate: null, amount: null, status: 'Pending', owner: null },
-              ]
-            })
-          } else {
-            // 🧩 Merge updates from the client screen
-            curr.group = s.name || curr.group
-            curr.entity = s.entityType || curr.entity
-            if (Array.isArray(s.years) && s.years.length) {
-              curr.year = s.years[0]
-            }
-          }
-        }
-        return next
+    // Keep this component in sync with the stores
+    const unsubClients = subscribeClients((next) => setClients(next || []));
+    const unsubOwners  = subscribeOwners((next)  => setOwners(next || []));
+
+    // Optional: debug stream to verify events arriving
+    const debug = supabase.channel('debug:clients')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'clients' }, (p) => {
+        console.log('[DEBUG realtime clients]', p)
       })
-    }
-    const unsub = storeSubscribe(() => syncFromStore())
-    syncFromStore()
-    return unsub
+      .subscribe()
+
+    return () => {
+      try { unsubClients?.() } catch {}
+      try { unsubOwners?.() } catch {}
+      try { supabase.removeChannel(debug) } catch {}
+    };
   }, [])
 
   // 🔁 MIGRATION: convert legacy string owners → ownerId (runs once at mount & when owners change)
@@ -638,8 +597,8 @@ export default function TaxPlanningDashboard() {
   const [selectedYear, setSelectedYear] = useState(null)
   const [isPending, startTransition] = useTransition()
 
-  const storeClients = storeGetClients()
-  const expandedRows = useMemo(() => expandRows(clients, storeClients), [clients, storeClients])
+  const legacyStoreClients = storeGetClients() // still used by expandRows adapter
+  const expandedRows = useMemo(() => expandRows(clients.length ? clients : DEFAULT_CLIENTS, legacyStoreClients), [clients, legacyStoreClients])
 
   const filtered = useMemo(() => {
     return expandedRows.filter(r =>
@@ -649,15 +608,15 @@ export default function TaxPlanningDashboard() {
     )
   }, [expandedRows, yearFilter, risk, query])
 
-  // 🔄 Keep selection valid and fresh
+  // Keep selection valid and fresh
   useEffect(() => {
     if (!selectedClient) return
     const hasRow = expandedRows.find(r => r.id === selectedClient.id && r.rowYear === selectedYear)
     if (!hasRow) {
-      const fallback = selectedClient.year || (storeClients.find(s => s.id === selectedClient.id)?.years?.[0])
+      const fallback = selectedClient.year || (legacyStoreClients.find(s => s.id === selectedClient.id)?.years?.[0])
       setSelectedYear(Number(fallback || new Date().getFullYear()))
     }
-  }, [selectedClient, expandedRows, selectedYear, storeClients])
+  }, [selectedClient, expandedRows, selectedYear, legacyStoreClients])
 
   const selectedClientFresh = useMemo(() => {
     if (!selectedClient) return null
@@ -683,6 +642,9 @@ export default function TaxPlanningDashboard() {
       return
     }
     setSafeHarborForYear(setClients, selectedClientFresh.id, selectedYear, val)
+
+    // Optional persist to DB (uncomment if your table supports JSONB for safeHarborByYear)
+    // updateClientRow(selectedClientFresh.id, { safeHarborByYear: { ...(selectedClientFresh.safeHarborByYear || {}), [selectedYear]: val } })
   }
 
   function commitServiceLevel(level) {
@@ -690,54 +652,13 @@ export default function TaxPlanningDashboard() {
     setDraftServiceLevel(level)
     startTransition(() => {
       setServiceLevelForYear(setClients, selectedClientFresh.id, selectedYear, level)
+      // Optional persist (see note above)
+      // updateClientRow(selectedClientFresh.id, { serviceLevelByYear: { ...(selectedClientFresh.serviceLevelByYear || {}), [selectedYear]: level } })
     })
   }
-  // ------------------------------------------------------
-// ✅ SUPABASE REALTIME SYNC
-// ------------------------------------------------------
-useEffect(() => {
-  console.log('Realtime sync initializing...')
 
-  // --- CLIENTS ---
-  const channelClients = supabase.channel('realtime:clients')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'clients' }, (payload) => {
-      console.log('Realtime event (clients):', payload)
-      setClients(prev => {
-        if (payload.eventType === 'INSERT') return [payload.new, ...prev]
-        if (payload.eventType === 'UPDATE') return prev.map(c => c.id === payload.new.id ? payload.new : c)
-        if (payload.eventType === 'DELETE') return prev.filter(c => c.id !== payload.old.id)
-        return prev
-      })
-    })
-    .subscribe()
-
-  // --- PLANNING YEARS ---
-  const channelYears = supabase.channel('realtime:planning_years')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'planning_years' }, (payload) => {
-      console.log('Realtime event (planning_years):', payload)
-      // You can add custom updates here if needed later
-    })
-    .subscribe()
-
-  // --- APP STATE ---
-  const channelAppState = supabase.channel('realtime:app_state')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'app_state' }, (payload) => {
-      console.log('Realtime event (app_state):', payload)
-      // This can be used to share UI states between users
-    })
-    .subscribe()
-
-  // Cleanup
-  return () => {
-    supabase.removeChannel(channelClients)
-    supabase.removeChannel(channelYears)
-    supabase.removeChannel(channelAppState)
-  }
-}, [])
-
-
-  // ------- CRUD helpers -------
-  function addClient() {
+  // ------- CRUD helpers (persist via store so realtime fans to all tabs) -------
+  async function addClient() {
     const group = prompt('Client/Group name (e.g., CB Direct, LLC):'); if (!group) return
     const client = prompt('Primary contact (e.g., Michael Cain):') || ''
     const entity = prompt('Entity type (Individual / S Corp / Partnership / C Corp):') || 'Individual'
@@ -745,6 +666,14 @@ useEffect(() => {
     const taxYear = Number(taxYearInput) || new Date().getFullYear()
     const serviceLevel = prompt('Service Level (Clarity / On Demand / Elevate):') || 'Clarity'
     const id = `${Date.now()}`
+
+    await addClientRow({
+      id,
+      name: group,
+      entityType: entity,
+      notes: client ? `Primary contact: ${client}` : '',
+      years: [taxYear]
+    })
 
     const newClient = {
       id, group, client, entity, serviceLevel, risk: 'Low', status: 'Active',
@@ -764,21 +693,20 @@ useEffect(() => {
     }
 
     startTransition(() => {
-      setClients(prev => [newClient, ...prev])
-      storeAddClient({ id, name: group, entityType: entity, notes: '', taxYear })
+      setClients(prev => [newClient, ...prev]) // UX; realtime will confirm/update
       setSelectedClient(newClient)
       setSelectedYear(taxYear)
       setView('dashboard')
     })
   }
 
-  function deleteClient(clientId) {
+  async function deleteClient(clientId) {
     if (!confirm('Delete this client? This action cannot be undone.')) return
+    await removeClientRow(clientId) // persist → realtime removes on all tabs
+
     startTransition(() => {
-      setClients(prev => prev.filter(c => c.id !== clientId))
+      setClients(prev => prev.filter(c => c.id !== clientId)) // UX; realtime also fires
       setSelectedClient(null)
-      const keep = storeClients.filter(s => s.id !== clientId)
-      storeSetClients(keep)
       setView('dashboard')
     })
   }
@@ -882,7 +810,7 @@ useEffect(() => {
       <div className="app-hero px-6 pt-8 pb-6">
         <div className="flex items-center justify-between">
           <h1 className="text-3xl font-semibold tracking-tight">JAG — Client-Level Tax Planning</h1>
-          {isPending && <span className="text-xs opacity-60">Updating…</span>}
+          {/* Could show a saving indicator from store if desired */}
         </div>
 
         {/* Top controls / view toggle */}
@@ -935,7 +863,7 @@ useEffect(() => {
       {view === 'ownerBoard' && (
         <OwnerBoard
           owners={owners}
-          clients={clients}
+          clients={clients.length ? clients : DEFAULT_CLIENTS}
           onDrill={drillToClientYear}
         />
       )}
