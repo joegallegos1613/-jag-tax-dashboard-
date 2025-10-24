@@ -8,6 +8,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Progress } from '@/components/ui/progress'
 import { Alert } from '@/components/ui/alert'
 import { Search, Trash2 } from 'lucide-react'
+import { supabase } from './lib/supabaseClient'
+
 
 // 🔗 Shared client store (used by /clients page too)
 import {
@@ -690,6 +692,49 @@ export default function TaxPlanningDashboard() {
       setServiceLevelForYear(setClients, selectedClientFresh.id, selectedYear, level)
     })
   }
+  // ------------------------------------------------------
+// ✅ SUPABASE REALTIME SYNC
+// ------------------------------------------------------
+useEffect(() => {
+  console.log('Realtime sync initializing...')
+
+  // --- CLIENTS ---
+  const channelClients = supabase.channel('realtime:clients')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'clients' }, (payload) => {
+      console.log('Realtime event (clients):', payload)
+      setClients(prev => {
+        if (payload.eventType === 'INSERT') return [payload.new, ...prev]
+        if (payload.eventType === 'UPDATE') return prev.map(c => c.id === payload.new.id ? payload.new : c)
+        if (payload.eventType === 'DELETE') return prev.filter(c => c.id !== payload.old.id)
+        return prev
+      })
+    })
+    .subscribe()
+
+  // --- PLANNING YEARS ---
+  const channelYears = supabase.channel('realtime:planning_years')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'planning_years' }, (payload) => {
+      console.log('Realtime event (planning_years):', payload)
+      // You can add custom updates here if needed later
+    })
+    .subscribe()
+
+  // --- APP STATE ---
+  const channelAppState = supabase.channel('realtime:app_state')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'app_state' }, (payload) => {
+      console.log('Realtime event (app_state):', payload)
+      // This can be used to share UI states between users
+    })
+    .subscribe()
+
+  // Cleanup
+  return () => {
+    supabase.removeChannel(channelClients)
+    supabase.removeChannel(channelYears)
+    supabase.removeChannel(channelAppState)
+  }
+}, [])
+
 
   // ------- CRUD helpers -------
   function addClient() {
