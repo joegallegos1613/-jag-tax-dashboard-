@@ -29,7 +29,7 @@ import {
 
 const SERVICE_LEVELS = ['Clarity', 'On Demand', 'Elevate']
 const PAYMENT_STATUSES = ['Pending', 'Sent', 'Paid']
-const DELIVERABLE_TYPES = ['Estimate', 'Info Request', 'Meeting', 'Payment Request', 'Projection', 'Return Sent', 'Strategy Memo']
+const DELIVERABLE_TYPES = ['Estimate', 'Info Request', 'Meeting', 'Payment Request', 'Projection', 'Return Sent', 'Strategy Memo', 'Invoice', 'CCT']
 const DELIVERABLE_STATUSES = ['Planned', 'Requested', 'Sent', 'Completed']
 
 function today() {
